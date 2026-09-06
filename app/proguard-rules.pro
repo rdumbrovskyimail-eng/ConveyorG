@@ -15,7 +15,6 @@
 # --------------------------------------------------------------------
 # 2. Аппаратная оптимизация R8 Full Mode (Snapdragon 8 Gen 2)
 # --------------------------------------------------------------------
-# Агрессивное расширение модификаторов доступа для прямого инлайнинга в ядрах ARM Cortex-X3
 -allowaccessmodification
 -repackageclasses ''
 
@@ -44,7 +43,7 @@
 # --------------------------------------------------------------------
 -dontwarn kotlinx.coroutines.**
 
-# Критически важно: фабрики диспетчеров для 120 Гц рендеринга (загружаются через ServiceLoader)
+# Фабрики диспетчеров для 120 Гц рендеринга (загружаются через ServiceLoader)
 -keep class kotlinx.coroutines.android.AndroidDispatcherFactory {
     public <init>();
 }
@@ -55,13 +54,12 @@
     public <init>();
 }
 
-# Защита полей внутренних корутинных очередей
 -keepclassmembers class kotlinx.coroutines.** {
     volatile <fields>;
 }
 
 # --------------------------------------------------------------------
-# 5. Kotlinx Serialization & Wire DTO модели Gemini
+# 5. Kotlinx Serialization: DTO Сети, Агентов и Рабочей Области
 # --------------------------------------------------------------------
 -dontnote kotlinx.serialization.**
 -dontwarn kotlinx.serialization.**
@@ -71,7 +69,7 @@
     @kotlinx.serialization.SerialName <fields>;
 }
 
-# Сохранение сгенерированных сериализаторов компилятора Kotlin K2
+# Сохранение Companion объектов и сгенерированных сериализаторов $serializer
 -keepclassmembers class * {
     public static final *** Companion;
 }
@@ -83,9 +81,23 @@
     public static final *** INSTANCE;
 }
 
-# Прямая защита сетевых DTO и их сгенерированных сериализаторов $serializer
+# Прямая защита сетевых моделей, DTO агентов и файлового хранилища
 -keep class com.conveyorg.network.** { *; }
 -keepclassmembers class com.conveyorg.network.** {
+    *** Companion;
+    *** $serializer;
+    <fields>;
+}
+
+-keep class com.conveyorg.agent.** { *; }
+-keepclassmembers class com.conveyorg.agent.** {
+    *** Companion;
+    *** $serializer;
+    <fields>;
+}
+
+-keep class com.conveyorg.data.** { *; }
+-keepclassmembers class com.conveyorg.data.** {
     *** Companion;
     *** $serializer;
     <fields>;
@@ -97,13 +109,10 @@
 -dontwarn androidx.security.crypto.**
 -dontwarn com.google.crypto.tink.**
 
-# Защита фабрик MasterKey и Keystore-провайдеров
 -keep class androidx.security.crypto.** { *; }
 -keep class com.google.crypto.tink.** { *; }
 -keep class * extends com.google.crypto.tink.KeyManager { *; }
 -keep class * extends com.google.crypto.tink.KeyTypeManager { *; }
-
-# Защита Keystore SPI и криптографических интерфейсов
 -keepclassmembers class * extends java.security.Provider { *; }
 
 # --------------------------------------------------------------------
@@ -111,11 +120,9 @@
 # --------------------------------------------------------------------
 -dontwarn androidx.compose.**
 
-# Защита объектов состояния Compose от изменения структуры полей
 -keepclassmembers class * extends androidx.compose.runtime.State { *; }
 -keepclassmembers class * extends androidx.compose.runtime.MutableState { *; }
 
-# Корректная защита стабильности классов Compose (таргет CLASS)
 -keep @androidx.compose.runtime.Stable class * { *; }
 -keep @androidx.compose.runtime.Immutable class * { *; }
 -keepclassmembers @androidx.compose.runtime.Stable class * { *; }
@@ -124,13 +131,12 @@
 # --------------------------------------------------------------------
 # 8. Android Architecture Components (ViewModel & Activity)
 # --------------------------------------------------------------------
-# Защита конструкторов AndroidViewModel(Application) и ViewModel() для рефлексии фабрик
 -keepclassmembers class * extends androidx.lifecycle.AndroidViewModel {
     public <init>(android.app.Application);
+    public <init>(android.app.Application, androidx.lifecycle.SavedStateHandle);
 }
 -keepclassmembers class * extends androidx.lifecycle.ViewModel {
     public <init>();
 }
 
-# Защита системного предиктивного жеста Назад (Android 14–16 API 34–36)
 -keep class * implements android.window.OnBackInvokedCallback { *; }
