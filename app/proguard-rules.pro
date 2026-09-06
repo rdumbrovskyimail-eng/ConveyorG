@@ -84,8 +84,8 @@
 }
 
 # Прямая защита сетевых DTO и их сгенерированных сериализаторов $serializer
--keep class com.clientg.network.** { *; }
--keepclassmembers class com.clientg.network.** {
+-keep class com.conveyorg.network.** { *; }
+-keepclassmembers class com.conveyorg.network.** {
     *** Companion;
     *** $serializer;
     <fields>;

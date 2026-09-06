@@ -1,8 +1,8 @@
-package com.clientg.network
+package com.conveyorg.network
 
 import android.net.TrafficStats
 import android.os.SystemClock
-import com.clientg.util.AppLogger
+import com.conveyorg.util.AppLogger
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*
 import io.ktor.client.plugins.*
