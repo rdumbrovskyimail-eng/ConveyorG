@@ -9,8 +9,16 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- 
-      2. Декларация видимости пакетов:
-      Гарантирует открытие внешних ссылок веб-источников Google Search Grounding в браузере
+      2. Аппаратные привилегии автономного конвейера:
+      - WAKE_LOCK: предотвращает засыпание Snapdragon 8 Gen 2 во время 5-минутных сборок в GitHub Actions
+      - VIBRATE: аппаратный тактильный отклик X-Axis LRA вибромотора при зажигании Зеленой Лампочки
+    -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- 
+      3. Декларация видимости пакетов:
+      Гарантирует открытие ссылок репозиториев, PR и коммитов в системном браузере
     -->
     <queries>
         <intent>
@@ -56,7 +64,7 @@
 
             <!-- 
               Системный перехват одиночного текста и документов:
-              Ограничен строго текстовыми форматами без бинарного application/octet-stream
+              Текст задачи автоматически заполняет поле промпта миссии конвейера
             -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
