@@ -1,0 +1,196 @@
+name: Refactor Package and Project Name
+
+on:
+  workflow_dispatch:
+    inputs:
+      old_package:
+        description: 'Старый пакет (с точками)'
+        required: true
+        default: 'com.clientg'
+      new_package:
+        description: 'Новый пакет (с точками)'
+        required: true
+        default: 'com.conveyorg'
+      old_name:
+        description: 'Старое имя модуля/папки'
+        required: true
+        default: 'clientg'
+      new_name:
+        description: 'Новое имя модуля/папки'
+        required: true
+        default: 'conveyorg'
+      create_new_branch:
+        description: 'Создать новую ветку (рекомендуется для защищенных веток)?'
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: write
+
+# Предотвращает конфликт параллельных запусков
+concurrency:
+  group: rename-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  execute-refactor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Полная история коммитов для сохранения git blame
+
+      - name: 2. Configure Git Bot Identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 3. Replace Package and Names in Code/Configs
+        run: |
+          python3 - << 'EOF'
+          import os
+
+          old_pkg = "${{ github.event.inputs.old_package }}"
+          new_pkg = "${{ github.event.inputs.new_package }}"
+          old_path = old_pkg.replace('.', '/')
+          new_path = new_pkg.replace('.', '/')
+          old_name = "${{ github.event.inputs.old_name }}"
+          new_name = "${{ github.event.inputs.new_name }}"
+
+          # Исключаемые папки
+          exclude_dirs = {'.git', '.gradle', 'build', 'target', '.idea', 'node_modules', '.github'}
+          
+          # Игнорируемые бинарные расширения
+          skip_exts = {
+              '.png', '.jpg', '.jpeg', '.gif', '.ico', '.webp',
+              '.jar', '.war', '.class', '.keystore', '.jks',
+              '.so', '.dll', '.dylib', '.exe',
+              '.zip', '.tar', '.gz', '.7z', '.pdf'
+          }
+
+          MAX_FILE_SIZE = 5 * 1024 * 1024  # Пропуск файлов более 5 МБ
+
+          print(f"Замена содержимого: {old_pkg} -> {new_pkg}")
+          print(f"Замена путей: {old_path} -> {new_path}")
+
+          for root, dirs, files in os.walk('.', topdown=True):
+              dirs[:] = [d for d in dirs if d not in exclude_dirs]
+
+              for file in files:
+                  _, ext = os.path.splitext(file)
+                  if ext.lower() in skip_exts:
+                      continue
+
+                  filepath = os.path.join(root, file)
+                  
+                  if os.path.islink(filepath) or os.path.getsize(filepath) > MAX_FILE_SIZE:
+                      continue
+
+                  try:
+                      # newline='' критически важен: предотвращает порчу CRLF/LF
+                      with open(filepath, 'r', encoding='utf-8', errors='ignore', newline='') as f:
+                          content = f.read()
+
+                      modified = False
+                      
+                      # 1. Замена com.clientg -> com.conveyorg
+                      if old_pkg in content:
+                          content = content.replace(old_pkg, new_pkg)
+                          modified = True
+                          
+                      # 2. Замена путей com/clientg -> com/conveyorg
+                      if old_path in content:
+                          content = content.replace(old_path, new_path)
+                          modified = True
+
+                      # 3. Точечная замена в конфигурациях сборки (settings.gradle, pom.xml)
+                      if file in {'settings.gradle', 'settings.gradle.kts', 'pom.xml', 'build.gradle', 'build.gradle.kts'}:
+                          if f"'{old_name}'" in content or f'"{old_name}"' in content or f'>{old_name}<' in content:
+                              content = content.replace(f"'{old_name}'", f"'{new_name}'")
+                              content = content.replace(f'"{old_name}"', f'"{new_name}"')
+                              content = content.replace(f'>{old_name}<', f'>{new_name}<')
+                              modified = True
+
+                      if modified:
+                          with open(filepath, 'w', encoding='utf-8', newline='') as f:
+                              f.write(content)
+                          print(f"[UPDATED] {filepath}")
+
+                  except Exception as e:
+                      print(f"[SKIP] Не удалось обработать {filepath}: {e}")
+          EOF
+
+      - name: 4. Move Directories (Bottom-Up Traversal)
+        run: |
+          python3 - << 'EOF'
+          import os
+          import shutil
+
+          old_name = "${{ github.event.inputs.old_name }}"
+          new_name = "${{ github.event.inputs.new_name }}"
+          exclude_dirs = {'.git', '.gradle', 'build', 'target', '.idea', 'node_modules', '.github'}
+
+          # Обход строго снизу вверх (topdown=False), чтобы не ломать дерево родителей
+          for root, dirs, _ in os.walk('.', topdown=False):
+              dirs[:] = [d for d in dirs if d not in exclude_dirs]
+              
+              for d in dirs:
+                  if d == old_name:
+                      src = os.path.join(root, d)
+                      dst = os.path.join(root, new_name)
+                      
+                      if os.path.exists(dst):
+                          # Если целевая папка уже существует, переносим файлы внутрь
+                          print(f"[MERGE] Слияние {src} -> {dst}")
+                          for item in os.listdir(src):
+                              s = os.path.join(src, item)
+                              d_item = os.path.join(dst, item)
+                              if os.path.exists(d_item):
+                                  if os.path.isdir(d_item):
+                                      shutil.copytree(s, d_item, dirs_exist_ok=True)
+                                  else:
+                                      shutil.copy2(s, d_item)
+                              else:
+                                  shutil.move(s, dst)
+                          shutil.rmtree(src)
+                      else:
+                          print(f"[RENAME] {src} -> {dst}")
+                          os.rename(src, dst)
+          EOF
+
+      - name: 5. Stage Changes and Detect Renames
+        run: |
+          git add -A
+          # Выводим статус Git: операции отобразятся как 'R' (Renamed)
+          git status --short
+
+      - name: 6. Commit and Push
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Нет изменений для коммита. Возможно, проект уже переименован."
+            exit 0
+          fi
+
+          COMMIT_MSG="refactor: rename ${{ github.event.inputs.old_package }} to ${{ github.event.inputs.new_package }}"
+
+          if [ "${{ github.event.inputs.create_new_branch }}" = "true" ]; then
+            TARGET_BRANCH="refactor/rename-${{ github.event.inputs.new_name }}"
+            echo "Создание новой ветки: $TARGET_BRANCH"
+            git checkout -b "$TARGET_BRANCH"
+            git commit -m "$COMMIT_MSG"
+            git push -u origin "$TARGET_BRANCH"
+            echo "======================================================================"
+            echo "УСПЕХ! Изменения отправлены в ветку: $TARGET_BRANCH"
+            echo "Создайте Pull Request в вашу основную ветку на странице GitHub."
+            echo "======================================================================"
+          else
+            echo "Прямой пуш в текущую ветку: ${{ github.ref_name }}"
+            git commit -m "$COMMIT_MSG"
+            git push origin HEAD:${{ github.ref_name }}
+            echo "======================================================================"
+            echo "УСПЕХ! Изменения отправлены напрямую в ветку ${{ github.ref_name }}."
+            echo "======================================================================"
+          fi
