@@ -1,6 +1,6 @@
-package com.clientg.data
+package com.conveyorg.data
 
-import com.clientg.presentation.UiChatMessage
+import com.conveyorg.presentation.UiChatMessage
 import kotlinx.serialization.Serializable
 import java.util.UUID
 

@@ -1,4 +1,4 @@
-package com.clientg.presentation
+package com.conveyorg.presentation
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -34,7 +34,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.clientg.network.InlineCitation
+import com.conveyorg.network.InlineCitation
 import kotlinx.coroutines.delay
 import java.util.Locale
 

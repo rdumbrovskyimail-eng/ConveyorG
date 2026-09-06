@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.clientg"
+    namespace = "com.conveyorg"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.clientg"
+        applicationId = "com.conveyorg"
         minSdk = 34
         targetSdk = 36
         versionCode = 1

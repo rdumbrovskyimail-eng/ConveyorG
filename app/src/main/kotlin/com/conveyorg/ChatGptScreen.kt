@@ -1,4 +1,4 @@
-package com.clientg
+package com.conveyorg
 
 import android.app.Activity
 import android.content.Intent
@@ -61,12 +61,12 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.clientg.data.ChatSessionMetadata
-import com.clientg.network.ChatRole
-import com.clientg.network.GroundingSource
-import com.clientg.network.TextAttachment
-import com.clientg.network.ThinkingLevel
-import com.clientg.presentation.*
+import com.conveyorg.data.ChatSessionMetadata
+import com.conveyorg.network.ChatRole
+import com.conveyorg.network.GroundingSource
+import com.conveyorg.network.TextAttachment
+import com.conveyorg.network.ThinkingLevel
+import com.conveyorg.presentation.*
 import kotlinx.coroutines.launch
 import java.util.Locale
 

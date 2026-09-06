@@ -1,4 +1,4 @@
-package com.clientg.presentation
+package com.conveyorg.presentation
 
 import android.app.Application
 import android.content.Context
@@ -11,10 +11,10 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
-import com.clientg.data.AtomicSessionStore
-import com.clientg.data.ChatSessionMetadata
-import com.clientg.network.*
-import com.clientg.util.AppLogger
+import com.conveyorg.data.AtomicSessionStore
+import com.conveyorg.data.ChatSessionMetadata
+import com.conveyorg.network.*
+import com.conveyorg.util.AppLogger
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel

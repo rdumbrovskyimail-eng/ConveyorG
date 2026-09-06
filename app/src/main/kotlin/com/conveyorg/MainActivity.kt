@@ -1,4 +1,4 @@
-package com.clientg
+package com.conveyorg
 
 import android.content.Intent
 import android.graphics.drawable.ColorDrawable
@@ -12,8 +12,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.core.content.IntentCompat
 import androidx.core.view.WindowCompat
-import com.clientg.presentation.ChatViewModel
-import com.clientg.util.AppLogger
+import com.conveyorg.presentation.ChatViewModel
+import com.conveyorg.util.AppLogger
 import android.graphics.Color as AndroidColor
 
 class MainActivity : ComponentActivity() {

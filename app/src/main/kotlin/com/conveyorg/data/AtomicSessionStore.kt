@@ -1,9 +1,9 @@
-package com.clientg.data
+package com.conveyorg.data
 
 import android.content.Context
 import androidx.core.util.AtomicFile
-import com.clientg.presentation.UiChatMessage
-import com.clientg.util.AppLogger
+import com.conveyorg.presentation.UiChatMessage
+import com.conveyorg.util.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex

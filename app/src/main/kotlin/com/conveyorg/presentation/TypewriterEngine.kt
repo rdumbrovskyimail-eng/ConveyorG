@@ -1,10 +1,10 @@
-package com.clientg.presentation
+package com.conveyorg.presentation
 
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.Choreographer
-import com.clientg.util.AppLogger
+import com.conveyorg.util.AppLogger
 import kotlinx.coroutines.*
 import kotlin.coroutines.resume
 import kotlin.math.ceil
