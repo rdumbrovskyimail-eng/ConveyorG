@@ -68,30 +68,26 @@ class LocalWorkspaceManager(
     private val context: Context
 ) {
 
-    // Изоляция от Google Cloud Backup в noBackupFilesDir
     val workspaceRoot: File by lazy {
         File(context.noBackupFilesDir, "workspaces/$sessionId/workspace").apply {
             if (!exists()) mkdirs()
         }
     }
 
-    // Каталог для Copy-On-Write резервных копий исходных версий файлов
     private val baselineBackupDir: File by lazy {
         File(context.noBackupFilesDir, "workspaces/$sessionId/.baseline_orig").apply {
             if (!exists()) mkdirs()
         }
     }
 
-    // Реестр контрольных сумм базового снимка (SHA-256)
     private val baselineHashes = ConcurrentHashMap<String, String>()
-
-    // Реестр пофайловых мьютексов для реализации закона A -> B
     private val fileLocks = ConcurrentHashMap<String, Mutex>()
     private val registryMutex = Mutex()
 
     companion object {
-        private const val HASH_BUFFER_SIZE = 16384 // 16 КБ буфер для аппаратного I/O на UFS 4.0
-        private const val BINARY_PROBE_SIZE = 1024  // Проверка первых 1024 байт на 0x00
+        private const val HASH_BUFFER_SIZE = 16384
+        private const val BINARY_PROBE_SIZE = 1024
+        private const val MAX_DIFF_LINE_SUM = 4000
 
         private val DEFAULT_IGNORED_DIRS = setOf(
             ".git", ".gradle", "build", ".idea", ".kotlin", "out", "bin"
@@ -102,13 +98,6 @@ class LocalWorkspaceManager(
         )
     }
 
-    // ====================================================================
-    // 3. Безопасность путей (CWE-22 / CERT FIO16-J)
-    // ====================================================================
-
-    /**
-     * Валидация канонического пути. Исключает выход за пределы папки сессии.
-     */
     fun resolveSafeFile(relativePath: String): File {
         val normalized = relativePath.trim().replace('\\', '/').removePrefix("/")
         val target = File(workspaceRoot, normalized).canonicalFile
@@ -124,10 +113,6 @@ class LocalWorkspaceManager(
         return file.canonicalFile.relativeTo(workspaceRoot.canonicalFile).path.replace('\\', '/')
     }
 
-    // ====================================================================
-    // 4. Пофайловые Мьютексы (Закон A -> B)
-    // ====================================================================
-
     private suspend fun getFileMutex(relativePath: String): Mutex {
         val normalized = relativePath.trim().replace('\\', '/').removePrefix("/")
         return fileLocks[normalized] ?: registryMutex.withLock {
@@ -142,13 +127,6 @@ class LocalWorkspaceManager(
         }
     }
 
-    // ====================================================================
-    // 5. Базовый снимок (SHA-256 Baseline Engine)
-    // ====================================================================
-
-    /**
-     * Снятие контрольных сумм всех файлов сразу после распаковки zipball.
-     */
     suspend fun captureBaseline(): Int = withContext(Dispatchers.IO) {
         baselineHashes.clear()
         var scannedCount = 0
@@ -186,10 +164,6 @@ class LocalWorkspaceManager(
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    // ====================================================================
-    // 6. Умное Чтение (Windowing, Binary Check, BOM Strip)
-    // ====================================================================
-
     suspend fun readFile(
         relativePath: String,
         startLine: Int? = null,
@@ -201,7 +175,6 @@ class LocalWorkspaceManager(
                 throw NoSuchFileException(file, reason = "Файл не существует в рабочей области: $relativePath")
             }
 
-            // Проверка на бинарный файл (нулевой байт 0x00)
             if (isBinaryFile(file)) {
                 return@withFileLock FileReadResult(
                     relativePath = relativePath,
@@ -214,7 +187,6 @@ class LocalWorkspaceManager(
 
             val lines = mutableListOf<String>()
             var totalLinesCount = 0
-            var bomStripped = false
 
             BufferedReader(InputStreamReader(FileInputStream(file), Charsets.UTF_8)).use { reader ->
                 var rawLine: String?
@@ -222,7 +194,6 @@ class LocalWorkspaceManager(
                     var line = rawLine!!
                     if (totalLinesCount == 0 && line.startsWith("\uFEFF")) {
                         line = line.removePrefix("\uFEFF")
-                        bomStripped = true
                     }
                     totalLinesCount++
                     lines.add(line)
@@ -266,13 +237,6 @@ class LocalWorkspaceManager(
         return false
     }
 
-    // ====================================================================
-    // 7. Атомарная Запись (F2FS / ext4 Atomic Rename & CoW Backup)
-    // ====================================================================
-
-    /**
-     * Атомарная запись файла через .tmp и fsync с поддержкой прав на исполнение.
-     */
     suspend fun writeFileAtomic(
         relativePath: String,
         contentBytes: ByteArray,
@@ -282,7 +246,6 @@ class LocalWorkspaceManager(
             val targetFile = resolveSafeFile(relativePath)
             targetFile.parentFile?.mkdirs()
 
-            // Copy-On-Write: сохраняем исходную версию файла для Myers Diff, если еще не сохранена
             if (targetFile.exists() && baselineHashes.containsKey(relativePath)) {
                 val backupFile = File(baselineBackupDir, relativePath)
                 if (!backupFile.exists()) {
@@ -297,18 +260,14 @@ class LocalWorkspaceManager(
                 FileOutputStream(tmpFile).use { fos ->
                     fos.write(contentBytes)
                     fos.flush()
-                    // Аппаратный сброс буфера ядра на физический накопитель UFS 4.0
                     fos.fd.sync()
                 }
 
-                // Системный вызов Linux rename(2) гарантирует атомарность подмены
                 if (!tmpFile.renameTo(targetFile)) {
-                    // Fallback при редких ограничениях файловой системы
                     tmpFile.copyTo(targetFile, overwrite = true)
                     tmpFile.delete()
                 }
 
-                // Выставление POSIX прав на исполнение для gradlew и скриптов
                 val makeExec = isExecutable ?: (targetFile.name == "gradlew" || targetFile.extension == "sh")
                 if (makeExec) {
                     targetFile.setExecutable(true, false)
@@ -329,7 +288,6 @@ class LocalWorkspaceManager(
             val targetFile = resolveSafeFile(relativePath)
             if (!targetFile.exists()) return@withFileLock false
 
-            // CoW бэкап удаляемого файла для честного Diff
             if (baselineHashes.containsKey(relativePath)) {
                 val backupFile = File(baselineBackupDir, relativePath)
                 if (!backupFile.exists()) {
@@ -341,13 +299,6 @@ class LocalWorkspaceManager(
         }
     }
 
-    // ====================================================================
-    // 8. Алгоритм Юджина Майерса (Native Myers Unified Diff)
-    // ====================================================================
-
-    /**
-     * Генерация сводного Unified Diff по всем измененным файлам проекта.
-     */
     suspend fun computeAggregatedDiff(): String = withContext(Dispatchers.IO) {
         val diffBuilder = StringBuilder()
         val delta = computeChangedFiles()
@@ -408,6 +359,12 @@ class LocalWorkspaceManager(
         val maxD = n + m
         if (n == 0 && m == 0) return ""
 
+        if (maxD > MAX_DIFF_LINE_SUM) {
+            return "--- a/$path\n+++ b/$path\n@@ -1,$n +1,$m @@\n" +
+                   "- [Файл слишком велик для построчного дифф-анализа: $n строк]\n" +
+                   "+ [Новая версия содержит: $m строк]"
+        }
+
         val v = IntArray(2 * maxD + 1)
         val trace = ArrayList<IntArray>()
 
@@ -438,7 +395,6 @@ class LocalWorkspaceManager(
             if (foundD != -1) break
         }
 
-        // Обратный ход: восстановление скрипта правок (Shortest Edit Script)
         val edits = ArrayList<DiffEdit>()
         var currX = n
         var currY = m
@@ -476,7 +432,6 @@ class LocalWorkspaceManager(
         }
         edits.reverse()
 
-        // Форматирование в блоки Unified Diff с маркерами @@ -L,S +L,S @@
         return formatUnifiedHunks(path, edits, contextLines)
     }
 
@@ -501,7 +456,6 @@ class LocalWorkspaceManager(
             val hunkStart = max(0, i - context)
             var hunkEnd = min(edits.size, i + context + 1)
 
-            // Объединение близлежащих изменений в один чанк
             var lookAhead = i + 1
             while (lookAhead < edits.size) {
                 if (edits[lookAhead].op != DiffOp.EQUAL) {
@@ -531,13 +485,6 @@ class LocalWorkspaceManager(
         return sb.toString().trimEnd()
     }
 
-    // ====================================================================
-    // 9. Сборка Дельты для Коммита (GitHubEngine.pushAtomicCommit)
-    // ====================================================================
-
-    /**
-     * Вычисляет измененные/добавленные/удаленные файлы для передачи в GitHub.
-     */
     suspend fun computeChangedFiles(): WorkspaceDeltaPayload = withContext(Dispatchers.IO) {
         val modifiedMap = mutableMapOf<String, ByteArray>()
         val deletedList = mutableListOf<String>()
@@ -561,24 +508,20 @@ class LocalWorkspaceManager(
                 currentFilesMap[relPath] = file
             }
 
-        // 1. Поиск новых и модифицированных файлов
         for ((relPath, file) in currentFilesMap) {
             val baseHash = baselineHashes[relPath]
             if (baseHash == null) {
-                // Новый файл
                 modifiedMap[relPath] = file.readBytes()
                 addedCount++
             } else {
                 val currentHash = calculateSha256(file)
                 if (currentHash != baseHash) {
-                    // Измененный файл
                     modifiedMap[relPath] = file.readBytes()
                     modifiedCount++
                 }
             }
         }
 
-        // 2. Поиск удаленных файлов
         for (relPath in baselineHashes.keys) {
             if (!currentFilesMap.containsKey(relPath)) {
                 deletedList.add(relPath)
@@ -598,10 +541,6 @@ class LocalWorkspaceManager(
             deletedCount = deletedList.size
         )
     }
-
-    // ====================================================================
-    // 10. Навигация и Поиск (Tree & Grep)
-    // ====================================================================
 
     suspend fun getProjectTree(
         maxDepth: Int = 8,
@@ -696,13 +635,6 @@ class LocalWorkspaceManager(
         results.take(maxResults)
     }
 
-    // ====================================================================
-    // 11. Отложенное Стирание (Wipeout Resilience)
-    // ====================================================================
-
-    /**
-     * Полная очистка папки сессии. Вызывается строго после подтверждения BUILD SUCCESSFUL.
-     */
     suspend fun wipeWorkspace(): Boolean = withContext(Dispatchers.IO) {
         AppLogger.w(AppLogger.TAG_APP, "LocalWorkspace: Старт полной очистки рабочей папки сессии $sessionId...")
         baselineHashes.clear()
@@ -711,7 +643,6 @@ class LocalWorkspaceManager(
         val sessionFolder = File(context.noBackupFilesDir, "workspaces/$sessionId")
         if (!sessionFolder.exists()) return@withContext true
 
-        // Обход снизу вверх со сбросом прав writable (удаление read-only файлов сборщика)
         val success = sessionFolder.walkBottomUp().all { file ->
             if (file.exists()) {
                 file.setWritable(true)
@@ -722,4 +653,6 @@ class LocalWorkspaceManager(
         AppLogger.i(AppLogger.TAG_APP, "LocalWorkspace: Очистка завершена (успех=$success)")
         success
     }
+
+    fun getBaselinePaths(): Set<String> = baselineHashes.keys.toSet()
 }
