@@ -86,13 +86,11 @@ class AutonomousConveyorController(
     private val _uiEvents = MutableSharedFlow<ConveyorMissionUiEvent>(extraBufferCapacity = 64)
     val uiEvents: SharedFlow<ConveyorMissionUiEvent> = _uiEvents.asSharedFlow()
 
-    // Внутренние ссылки на активные модули сессии
     private var activeWorkspaceManager: LocalWorkspaceManager? = null
     private var activeGitHubEngine: GitHubEngine? = null
     private var activeSwarmCoordinator: BuilderSwarmCoordinator? = null
     private var activeOrchestrator: AutonomousOrchestrator? = null
 
-    // Тарифные ставки для финансового счетчика (Gemini 3.8 Flash & 3.5 Flash-Lite)
     companion object {
         private const val COST_PER_1M_INPUT_38 = 0.75
         private const val COST_PER_1M_OUTPUT_38 = 3.75
@@ -100,13 +98,6 @@ class AutonomousConveyorController(
         private const val COST_PER_1M_OUTPUT_35 = 0.60
     }
 
-    // ====================================================================
-    // 3. Запуск Миссии Конвейера (Start Mission)
-    // ====================================================================
-
-    /**
-     * Запуск сквозного конвейера: Оркестратор + Рой из 20 Билдеров (10 A + 10 B) + Git + CI.
-     */
     fun startMission(
         owner: String,
         repo: String,
@@ -160,27 +151,23 @@ class AutonomousConveyorController(
         val gitHubEngine = GitHubEngine(gitHubTokenProvider, httpClient, shouldCloseHttpClient = false).also { activeGitHubEngine = it }
         val swarmCoordinator = BuilderSwarmCoordinator(context, workspaceManager, geminiApiKeyProvider, httpClient, shouldCloseHttpClient = false).also { activeSwarmCoordinator = it }
 
-        // Создаем композитный мост инструментов с инъекцией роевых методов
         val compositeBridge = CompositeOrchestratorToolBridge(
             workspaceManager = workspaceManager,
             gitHubEngine = gitHubEngine,
             swarmCoordinator = swarmCoordinator
         )
 
-        // Запускаем слушателей телеметрии роя и связки с UI
         val swarmObserverJob = launch { observeSwarmEvents(swarmCoordinator) }
 
         var taskResult: AutonomousTaskResult? = null
 
         try {
-            // ШАГ 1: Подготовка локальной файловой системы UFS 4.0
             _uiState.update { it.copy(statusMessage = "Загрузка архива репозитория из GitHub...") }
             gitHubEngine.downloadAndUnpackZipball(owner, repo, branch, workspaceManager.workspaceRoot)
 
             _uiState.update { it.copy(statusMessage = "Фиксация SHA-256 контрольного снимка...") }
             val baselineFilesCount = workspaceManager.captureBaseline()
 
-            // ШАГ 2: Запуск автономного Оркестратора Gemini 3.8 Flash
             val orchestrator = AutonomousOrchestrator(
                 context = context,
                 geminiApiKeyProvider = geminiApiKeyProvider,
@@ -198,19 +185,20 @@ class AutonomousConveyorController(
                 )
             }
 
-            // ШАГ 3: Запуск исполнительного цикла
             taskResult = orchestrator.runAutonomousTask(
                 owner = owner,
                 repo = repo,
                 branch = branch,
                 userObjective = userObjective,
                 maxSteps = maxSteps,
-                maxRepairRounds = maxRepairRounds
+                maxRepairRounds = maxRepairRounds,
+                existingWorkspaceManager = workspaceManager,
+                existingGitHubEngine = gitHubEngine,
+                existingToolBridge = compositeBridge
             )
 
             orchestratorObserverJob.cancel()
 
-            // ШАГ 4: Финализация миссии
             if (taskResult.isSuccess) {
                 _uiState.update {
                     it.copy(
@@ -237,7 +225,6 @@ class AutonomousConveyorController(
         } catch (e: CancellationException) {
             AppLogger.w(AppLogger.TAG_APP, "ConveyorController: Миссия прервана пользователем.")
             withContext(NonCancellable) {
-                // SAGA ROLLBACK: при отмене возвращаем файлы рабочей области к базовому снимку
                 executeSagaRollback(workspaceManager)
                 _uiState.update {
                     it.copy(
@@ -266,10 +253,6 @@ class AutonomousConveyorController(
             }
         }
     }
-
-    // ====================================================================
-    // 4. Наблюдаемость и Слияние Потоков Телеметрии (120 Hz Telemetry)
-    // ====================================================================
 
     private suspend fun observeSwarmEvents(swarm: BuilderSwarmCoordinator) {
         swarm.events.collect { event ->
@@ -314,7 +297,6 @@ class AutonomousConveyorController(
                     _uiEvents.emit(ConveyorMissionUiEvent.HapticTrigger(isStrong = false))
                 }
                 is SwarmEvent.GreenLightIgnited -> {
-                    // ТОЧКА РАНДЕВУ: вспыхнула 🟢 Зеленая лампочка!
                     _uiState.update {
                         it.copy(
                             isGreenLightOn = true,
@@ -380,13 +362,14 @@ class AutonomousConveyorController(
 
     private fun calculateEstimatedCost() {
         val orchestratorState = activeOrchestrator?.state?.value ?: return
-        val swarmState = activeSwarmCoordinator?.state?.value ?: return
+        val swarmManifestTokens = activeSwarmCoordinator?.getBurnedTokensSnapshot() ?: 0L
 
         val cost38Input = (orchestratorState.totalPromptTokens / 1_000_000.0) * COST_PER_1M_INPUT_38
         val cost38Output = ((orchestratorState.totalCandidateTokens + orchestratorState.totalThoughtsTokens) / 1_000_000.0) * COST_PER_1M_OUTPUT_38
+        val cost35 = (swarmManifestTokens / 1_000_000.0) * ((COST_PER_1M_INPUT_35 + COST_PER_1M_OUTPUT_35) / 2.0)
 
-        val totalTokens = orchestratorState.totalPromptTokens + orchestratorState.totalCandidateTokens + orchestratorState.totalThoughtsTokens
-        val totalCost = cost38Input + cost38Output
+        val totalTokens = orchestratorState.totalPromptTokens + orchestratorState.totalCandidateTokens + orchestratorState.totalThoughtsTokens + swarmManifestTokens
+        val totalCost = cost38Input + cost38Output + cost35
 
         _uiState.update {
             it.copy(
@@ -396,14 +379,18 @@ class AutonomousConveyorController(
         }
     }
 
-    // ====================================================================
-    // 5. Транзакционный Откат (Saga Pattern Rollback)
-    // ====================================================================
-
     private fun executeSagaRollback(workspaceManager: LocalWorkspaceManager) {
         AppLogger.w(AppLogger.TAG_APP, "SagaRollback: Запуск компенсирующей транзакции (откат к .baseline_orig)...")
         val sessionRoot = workspaceManager.workspaceRoot
         val backupDir = File(context.noBackupFilesDir, "workspaces/${workspaceManager.sessionId}/.baseline_orig")
+        val baselinePaths = workspaceManager.getBaselinePaths()
+
+        sessionRoot.walkTopDown().filter { it.isFile && !it.path.contains(".baseline") }.forEach { file ->
+            val relPath = file.relativeTo(sessionRoot).path.replace('\\', '/')
+            if (relPath !in baselinePaths) {
+                file.delete()
+            }
+        }
 
         if (backupDir.exists()) {
             backupDir.walkTopDown().filter { it.isFile }.forEach { backupFile ->
@@ -415,10 +402,6 @@ class AutonomousConveyorController(
             AppLogger.i(AppLogger.TAG_APP, "SagaRollback: Файлы успешно восстановлены из резервной копии.")
         }
     }
-
-    // ====================================================================
-    // 6. Управление Жизненным Циклом Миссии (Cancel & Cleanup)
-    // ====================================================================
 
     fun cancelMission() {
         controllerScope.launch {
@@ -456,10 +439,7 @@ class AutonomousConveyorController(
 // 7. Композитный Инструментальный Мост с Инъекцией Роя (Swarm Tools)
 // ====================================================================
 
-/**
- * Расширенный мост, объединяющий 12 базовых инструментов с 4 роевыми инструментами управления стаей.
- */
-internal class CompositeOrchestratorToolBridge(
+class CompositeOrchestratorToolBridge(
     private val workspaceManager: LocalWorkspaceManager,
     private val gitHubEngine: GitHubEngine,
     private val swarmCoordinator: BuilderSwarmCoordinator
@@ -508,7 +488,7 @@ internal class CompositeOrchestratorToolBridge(
             ),
             FunctionDeclarationDto(
                 name = "swarm_get_reports_manifest",
-                description = "Возвращает сводный манифест всех 20 отчетов билдеров после зажигания Зеленой лампочки для финального семантического аудита.",
+                description = "Возвращает сводный манифест всех отчетов билдеров после зажигания Зеленой лампочки для финального семантического аудита.",
                 parameters = FunctionParametersSchemaDto(properties = emptyMap())
             )
         )
@@ -580,7 +560,6 @@ internal class CompositeOrchestratorToolBridge(
                 })
             }
             else -> {
-                // Если инструмент базовый (диск, коммиты, CI) — делегируем в OrchestratorToolBridge
                 baseBridge.dispatchToolCall(call, thoughtSignature)
             }
         }
