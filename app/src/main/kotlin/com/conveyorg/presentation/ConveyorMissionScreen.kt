@@ -1138,6 +1138,8 @@ private fun KnoxVaultSettingsDialog(
 ) {
     var geminiKey by remember { mutableStateOf("") }
     var githubPat by remember { mutableStateOf("") }
+    val hasGemini = currentGeminiKey.isNotBlank() && currentGeminiKey != "******"
+    val hasGitHub = currentGitHubPat.isNotBlank() && currentGitHubPat != "******"
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1152,7 +1154,7 @@ private fun KnoxVaultSettingsDialog(
         text = {
             Column {
                 Text(
-                    text = "Ключи шифруются аппаратным модулем Knox Vault (AES-256-GCM) и никогда не передаются в открытом виде.",
+                    text = "Ключи шифруются аппаратно (AES-256-GCM). Если ключ уже сохранен, оставьте поле пустым — оно не будет затерто.",
                     color = TextSecondary,
                     fontSize = 11.sp,
                     lineHeight = 15.sp,
@@ -1163,7 +1165,14 @@ private fun KnoxVaultSettingsDialog(
                 OutlinedTextField(
                     value = geminiKey,
                     onValueChange = { geminiKey = it },
-                    label = { Text("Gemini API Key (${currentGeminiKey.ifBlank { "пусто" }})", fontSize = 10.sp) },
+                    label = { 
+                        Text(
+                            text = if (hasGemini) "Gemini Key: $currentGeminiKey (сохранен)" else "Введите Gemini API Key",
+                            color = if (hasGemini) NeonGreen else TextSecondary,
+                            fontSize = 10.sp
+                        ) 
+                    },
+                    placeholder = { Text("Вставьте новый ключ для замены", fontSize = 11.sp, color = TextMuted) },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
                     textStyle = TextStyle(color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace),
@@ -1175,7 +1184,14 @@ private fun KnoxVaultSettingsDialog(
                 OutlinedTextField(
                     value = githubPat,
                     onValueChange = { githubPat = it },
-                    label = { Text("GitHub PAT (${currentGitHubPat.ifBlank { "пусто" }})", fontSize = 10.sp) },
+                    label = { 
+                        Text(
+                            text = if (hasGitHub) "GitHub PAT: $currentGitHubPat (сохранен)" else "Введите GitHub PAT (ghp_...)",
+                            color = if (hasGitHub) NeonGreen else TextSecondary,
+                            fontSize = 10.sp
+                        ) 
+                    },
+                    placeholder = { Text("Вставьте новый токен для замены", fontSize = 11.sp, color = TextMuted) },
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
                     textStyle = TextStyle(color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace),
