@@ -1010,7 +1010,7 @@ class GeminiClient(
                 val totalDuration = (SystemClock.elapsedRealtime() - startTime).coerceAtLeast(0L)
                 collector(GeminiStreamEvent.Completed(finalFinishReason, totalDuration, latestThoughtSignature))
             }
-        } catch (e: CancellationException) {
+        } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: GeminiApiException) {
             throw e
