@@ -36,7 +36,7 @@ data class FunctionParametersSchemaDto(
 
 @Serializable
 data class ParameterPropertyDto(
-    val type: String, // "STRING", "INTEGER", "BOOLEAN", "ARRAY", "OBJECT"
+    val type: String,
     val description: String,
     val enum: List<String>? = null,
     val items: ParameterPropertyDto? = null,
@@ -81,8 +81,8 @@ class OrchestratorToolBridge(
 ) {
 
     companion object {
-        private const val TOOL_EXECUTION_TIMEOUT_MS = 90_000L // 90 сек таймаут на выполнение инструмента
-        private const val MAX_OUTPUT_CHARS = 40_000          // Лимит размера ответа для защиты контекста
+        private const val TOOL_EXECUTION_TIMEOUT_MS = 90_000L
+        private const val MAX_OUTPUT_CHARS = 40_000
 
         @OptIn(ExperimentalSerializationApi::class)
         private val json = Json {
@@ -93,14 +93,9 @@ class OrchestratorToolBridge(
         }
     }
 
-    // ====================================================================
-    // 3. Реестр Деклараций Схем Инструментов для Gemini 3.8 Flash
-    // ====================================================================
-
     fun getToolDeclarations(): GeminiToolDto {
         return GeminiToolDto(
             functionDeclarations = listOf(
-                // --- ГРУППА 1: Локальная инспекция репозитория (на телефоне) ---
                 FunctionDeclarationDto(
                     name = "workspace_get_tree",
                     description = "Возвращает структуру дерева локального репозитория. Используйте для понимания структуры папок и пакетов перед работой.",
@@ -163,11 +158,9 @@ class OrchestratorToolBridge(
                         properties = emptyMap()
                     )
                 ),
-
-                // --- ГРУППА 2: Пуш, Компиляция и CI/CD в GitHub ---
                 FunctionDeclarationDto(
                     name = "github_push_atomic_commit",
-                    description = "Вычисляет дельту измененных файлов на диске телефона, создает блобы, дерево и отправляет в ветку GitHub ОДНИМ атомарным коммитом.",
+                    description = "Вычисляет дельту измененных и удаленных файлов на диске телефона, создает блобы, дерево и отправляет в ветку GitHub ОДНИМ атомарным коммитом.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
                             "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец репозитория (пользователь или организация)."),
@@ -215,8 +208,6 @@ class OrchestratorToolBridge(
                         required = listOf("owner", "repo", "job_id")
                     )
                 ),
-
-                // --- ГРУППА 3: Pull Requests и Коллаборация ---
                 FunctionDeclarationDto(
                     name = "github_create_pull_request",
                     description = "Открывает Pull Request из рабочей ветки в базовую с подробным описанием проделанной работы.",
@@ -250,8 +241,6 @@ class OrchestratorToolBridge(
                         required = listOf("owner", "repo", "pull_number")
                     )
                 ),
-
-                // --- ГРУППА 4: Универсальный Шлюз (100% Escape Hatch) ---
                 FunctionDeclarationDto(
                     name = "github_execute_raw_rest",
                     description = "Универсальный шлюз: выполняет произвольный запрос к абсолютно любому эндпоинту GitHub REST API (100% покрытие любых редких методов).",
@@ -279,10 +268,6 @@ class OrchestratorToolBridge(
             )
         )
     }
-
-    // ====================================================================
-    // 4. Диспетчеризация и Выполнение Инструментов (Execution Router)
-    // ====================================================================
 
     suspend fun dispatchToolCall(
         call: FunctionCallDto,
@@ -316,7 +301,6 @@ class OrchestratorToolBridge(
 
     private suspend fun routeCallInternal(name: String, args: JsonObject): JsonObject {
         return when (name) {
-            // 1. Дерево файлов
             "workspace_get_tree" -> {
                 val maxDepth = args["max_depth"]?.jsonPrimitive?.intOrNull ?: 8
                 val treeDto = workspaceManager.getProjectTree(maxDepth = maxDepth)
@@ -339,7 +323,6 @@ class OrchestratorToolBridge(
                 }
             }
 
-            // 2. Чтение файла с окном строк
             "workspace_read_file" -> {
                 val path = args.getRequiredString("path")
                 val startLine = args["start_line"]?.jsonPrimitive?.intOrNull
@@ -358,7 +341,6 @@ class OrchestratorToolBridge(
                 }
             }
 
-            // 3. Полнотекстовый поиск по проекту
             "workspace_search_symbol" -> {
                 val query = args.getRequiredString("query")
                 val exts = args["file_extensions"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet() ?: emptySet()
@@ -381,7 +363,6 @@ class OrchestratorToolBridge(
                 }
             }
 
-            // 4. Сводный Myers Diff
             "workspace_read_diff" -> {
                 val diffOutput = workspaceManager.computeAggregatedDiff()
                 buildJsonObject {
@@ -391,7 +372,6 @@ class OrchestratorToolBridge(
                 }
             }
 
-            // 5. Атомарный коммит и пуш дельты
             "github_push_atomic_commit" -> {
                 val owner = args.getRequiredString("owner")
                 val repo = args.getRequiredString("repo")
@@ -399,10 +379,10 @@ class OrchestratorToolBridge(
                 val message = args.getRequiredString("commit_message")
 
                 val delta = workspaceManager.computeChangedFiles()
-                if (delta.modifiedFiles.isEmpty()) {
+                if (delta.modifiedFiles.isEmpty() && delta.deletedFiles.isEmpty()) {
                     return buildJsonObject {
                         put("status", "nothing_to_commit")
-                        put("message", "На диске нет измененных файлов для отправки в репозиторий.")
+                        put("message", "На диске нет измененных или удаленных файлов для отправки в репозиторий.")
                     }
                 }
 
@@ -411,7 +391,8 @@ class OrchestratorToolBridge(
                     repo = repo,
                     branch = branch,
                     commitMessage = message,
-                    modifiedFiles = delta.modifiedFiles
+                    modifiedFiles = delta.modifiedFiles,
+                    deletedFiles = delta.deletedFiles
                 )
 
                 buildJsonObject {
@@ -426,7 +407,6 @@ class OrchestratorToolBridge(
                 }
             }
 
-            // 6. Запуск сборщика Actions
             "github_trigger_ci_build" -> {
                 val owner = args.getRequiredString("owner")
                 val repo = args.getRequiredString("repo")
@@ -442,7 +422,6 @@ class OrchestratorToolBridge(
                 }
             }
 
-            // 7. Проверка статуса сборщика Actions
             "github_get_ci_status" -> {
                 val owner = args.getRequiredString("owner")
                 val repo = args.getRequiredString("repo")
@@ -460,7 +439,6 @@ class OrchestratorToolBridge(
                 }
             }
 
-            // 8. Выкачка лога ошибок компилятора
             "github_get_ci_logs" -> {
                 val owner = args.getRequiredString("owner")
                 val repo = args.getRequiredString("repo")
@@ -474,7 +452,6 @@ class OrchestratorToolBridge(
                 }
             }
 
-            // 9. Создание Pull Request
             "github_create_pull_request" -> {
                 val owner = args.getRequiredString("owner")
                 val repo = args.getRequiredString("repo")
@@ -492,7 +469,6 @@ class OrchestratorToolBridge(
                 }
             }
 
-            // 10. Слияние Pull Request
             "github_merge_pull_request" -> {
                 val owner = args.getRequiredString("owner")
                 val repo = args.getRequiredString("repo")
@@ -509,7 +485,6 @@ class OrchestratorToolBridge(
                 }
             }
 
-            // 11. Универсальный REST шлюз
             "github_execute_raw_rest" -> {
                 val method = args.getRequiredString("method")
                 val path = args.getRequiredString("endpoint_path")
@@ -523,7 +498,6 @@ class OrchestratorToolBridge(
                 }
             }
 
-            // 12. Универсальный GraphQL шлюз
             "github_execute_graphql" -> {
                 val query = args.getRequiredString("query")
                 val vars = args["variables"]?.jsonObject?.mapValues { it.value.jsonPrimitive.content } ?: emptyMap()
@@ -540,10 +514,6 @@ class OrchestratorToolBridge(
             }
         }
     }
-
-    // ====================================================================
-    // 5. Изоляция Сбоев и Помощь в Самоисцелении (Tool Error Boundary)
-    // ====================================================================
 
     private fun buildErrorPayload(toolName: String, e: Exception): JsonObject {
         val hint = when (e) {
