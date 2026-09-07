@@ -11,7 +11,6 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -163,7 +162,7 @@ internal data class GeminiWireRequest(
 internal data class CreateCachedContentRequest(
     val model: String,
     val contents: List<ContentDto>,
-    val ttl: String = "7200s" // Гарантированная фиксация в памяти TPU на 2 часа
+    val ttl: String = "7200s"
 )
 
 @Serializable
@@ -469,10 +468,6 @@ class GeminiClient(
         coerceInputValues = true
     }
 
-    /**
-     * Аппаратная фиксация тяжелых вложений в кэше TPU Google на 2 часа (7200 сек).
-     * Защищает от повторного списания 100k-140k токенов при любых сетевых сбоях.
-     */
     suspend fun pinExplicitContextCache(
         attachments: List<TextAttachment>,
         modelName: String = DEFAULT_MODEL_NAME,
@@ -522,9 +517,6 @@ class GeminiClient(
         parsedResponse.name
     }
 
-    /**
-     * Удаление явного кэша при очистке диалога для освобождения квот.
-     */
     suspend fun deleteExplicitCache(cachedContentId: String) = withContext(Dispatchers.IO) {
         val apiKey = apiKeyProvider().trim()
         if (apiKey.isBlank() || cachedContentId.isBlank()) return@withContext
@@ -538,9 +530,6 @@ class GeminiClient(
         }
     }
 
-    /**
-     * Потоковая генерация ответа с поддержкой явного кэша и самоисцелением при истечении TTL (404).
-     */
     fun streamContent(
         prompt: String,
         history: List<ChatMessage> = emptyList(),
@@ -568,16 +557,15 @@ class GeminiClient(
                     systemInstruction = systemInstruction,
                     collector = { emit(it) }
                 )
-                break // Запрос успешно завершен
+                break
             } catch (e: GeminiApiException) {
-                // САМОИСЦЕЛЕНИЕ: Если Google вернул 404 (кэш просрочен по истечении 2 часов)
                 if (e.httpStatusCode == HttpStatusCode.NotFound && currentCacheId != null && !cacheRetried && onCacheExpired != null) {
                     AppLogger.w(AppLogger.TAG_NET, "streamContent: Кэш $currentCacheId просрочен (404). Авто-перевыпуск кэша...")
                     val refreshedCacheId = onCacheExpired()
                     if (refreshedCacheId != null) {
                         currentCacheId = refreshedCacheId
                         cacheRetried = true
-                        continue // Повторяем вызов с новым валидным ID кэша без списания токенов!
+                        continue
                     }
                 }
                 throw e
@@ -609,7 +597,6 @@ class GeminiClient(
         val startTime = SystemClock.elapsedRealtime()
         val endpointUrl = "$BASE_URL/models/$modelName:streamGenerateContent?key=$apiKey&alt=sse"
 
-        // 1. Формирование истории. Если кэш активен, вложения НЕ дублируются по сети!
         val rawTurns = ArrayList<ContentDto>(history.size + 1)
         for (msg in history) {
             val historyParts = buildList {
@@ -629,7 +616,6 @@ class GeminiClient(
             }
         }
 
-        // 2. Текущий ход пользователя
         val currentParts = buildList {
             if (cachedContentId == null) {
                 attachments.forEach { att ->
@@ -671,7 +657,7 @@ class GeminiClient(
             }
         }
 
-        val systemDto = if (systemInstruction.isNotBlank() && cachedContentId == null) {
+        val systemDto = if (systemInstruction.isNotBlank()) {
             SystemInstructionDto(listOf(PartDto(text = systemInstruction)))
         } else {
             null
