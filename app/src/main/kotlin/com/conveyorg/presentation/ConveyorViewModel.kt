@@ -138,7 +138,6 @@ class ConveyorViewModel(
         // 2. Реактивное слияние телеметрии контроллера в Compose UI State
         viewModelScope.launch {
             conveyorController.uiState
-                .distinctUntilChanged()
                 .collect { missionState ->
                     _screenState.update { current ->
                         current.copy(mission = missionState)
