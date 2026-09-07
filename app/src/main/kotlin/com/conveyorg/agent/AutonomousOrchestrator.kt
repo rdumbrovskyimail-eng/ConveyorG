@@ -181,7 +181,8 @@ class AutonomousOrchestrator(
     private val loopMutex = Mutex()
 
     companion object {
-        private const val GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+        // Рабочий шлюз Vertex AI Express Mode из вашего рабочего GeminiClient.kt
+        private const val GEMINI_BASE_URL = "https://aiplatform.googleapis.com/v1/publishers/google/models"
         private const val MODEL_NAME = "gemini-3.8-flash"
         private const val WAKELOCK_TAG = "ClientG:AutonomousOrchestrator"
 
@@ -506,7 +507,7 @@ class AutonomousOrchestrator(
         toolDeclarations: GeminiToolDto
     ): AgentContentDto = withContext(Dispatchers.IO) {
         val apiKey = geminiApiKeyProvider().trim()
-        val endpoint = "$GEMINI_BASE_URL/models/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
+        val endpoint = "$GEMINI_BASE_URL/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
 
         val requestPayload = AgentWireRequest(
             systemInstruction = AgentSystemInstructionDto(listOf(AgentPartDto(text = systemPrompt))),
@@ -526,6 +527,7 @@ class AutonomousOrchestrator(
         var isThinkingActive = false
 
         httpClient.preparePost(endpoint) {
+            header("x-goog-api-key", apiKey)
             header(HttpHeaders.Accept, "text/event-stream")
             header(HttpHeaders.CacheControl, "no-cache")
             contentType(ContentType.Application.Json)
