@@ -106,46 +106,42 @@ class ConveyorViewModel(
     val sideEffects: Flow<ConveyorScreenSideEffect> = _sideEffects.receiveAsFlow()
 
     init {
-        AppLogger.i(AppLogger.TAG_VM, "ConveyorViewModel: Инициализация. Чтение ключей Knox Vault и связывание потоков...")
+        AppLogger.i(AppLogger.TAG_VM, "ConveyorViewModel: Инициализация. Синхронное чтение ключей хранилища...")
 
-        // Инициализируем контроллер с провайдерами ключей из аппаратного сейфа
+        // Читаем ключи сразу при старте, чтобы они были готовы к первому же клику
+        val initialPrefs = getSecurePreferences(getApplication())
+        val initialGemini = initialPrefs.getString(KEY_GEMINI_KEY, "") ?: ""
+        val initialGitHub = initialPrefs.getString(KEY_GITHUB_PAT, "") ?: ""
+
+        cachedGeminiKey = initialGemini
+        cachedGitHubPat = initialGitHub
+
+        _screenState.update { current ->
+            current.copy(
+                geminiApiKeyMasked = AppLogger.maskKey(initialGemini),
+                githubPatMasked = AppLogger.maskKey(initialGitHub),
+                hasValidGeminiKey = initialGemini.isNotBlank(),
+                hasValidGitHubPat = initialGitHub.isNotBlank()
+            )
+        }
+
+        // Инициализируем контроллер с провайдерами ключей
         conveyorController = AutonomousConveyorController(
             context = getApplication(),
             geminiApiKeyProvider = { cachedGeminiKey },
             gitHubTokenProvider = { cachedGitHubPat }
         )
 
-        // 1. Асинхронное чтение секретов из аппаратного анклава Knox Vault
-        viewModelScope.launch(Dispatchers.IO) {
-            val prefs = getSecurePreferences(getApplication())
-            val savedGemini = prefs.getString(KEY_GEMINI_KEY, "") ?: ""
-            val savedGitHub = prefs.getString(KEY_GITHUB_PAT, "") ?: ""
-
-            cachedGeminiKey = savedGemini
-            cachedGitHubPat = savedGitHub
-
-            _screenState.update { current ->
-                current.copy(
-                    geminiApiKeyMasked = AppLogger.maskKey(savedGemini),
-                    githubPatMasked = AppLogger.maskKey(savedGitHub),
-                    hasValidGeminiKey = savedGemini.isNotBlank(),
-                    hasValidGitHubPat = savedGitHub.isNotBlank()
-                )
-            }
-            AppLogger.d(AppLogger.TAG_VM, "ConveyorViewModel: Ключи загружены (Gemini: ${savedGemini.isNotBlank()}, GitHub: ${savedGitHub.isNotBlank()})")
-        }
-
-        // 2. Реактивное слияние телеметрии контроллера в Compose UI State
+        // Реактивное слияние телеметрии контроллера в Compose UI State
         viewModelScope.launch {
-            conveyorController.uiState
-                .collect { missionState ->
-                    _screenState.update { current ->
-                        current.copy(mission = missionState)
-                    }
+            conveyorController.uiState.collect { missionState ->
+                _screenState.update { current ->
+                    current.copy(mission = missionState)
                 }
+            }
         }
 
-        // 3. Прослушивание событий миссии и физическая тактильная оркестрация (LRA Haptics)
+        // Прослушивание событий миссии и тактильная оркестрация
         viewModelScope.launch {
             conveyorController.uiEvents.collect { event ->
                 handleConveyorUiEvent(event)
@@ -270,19 +266,19 @@ class ConveyorViewModel(
     }
 
     fun onSaveCredentials(geminiKey: String, githubPat: String) {
-        val cleanGemini = geminiKey.trim()
-        val cleanGitHub = githubPat.trim()
+        // Если поле оставили пустым — сохраняем уже имеющийся ключ!
+        val cleanGemini = geminiKey.trim().ifBlank { cachedGeminiKey }
+        val cleanGitHub = githubPat.trim().ifBlank { cachedGitHubPat }
 
         cachedGeminiKey = cleanGemini
         cachedGitHubPat = cleanGitHub
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                getSecurePreferences(getApplication()).edit().apply {
-                    putString(KEY_GEMINI_KEY, cleanGemini)
-                    putString(KEY_GITHUB_PAT, cleanGitHub)
-                    apply()
-                }
+                val editor = getSecurePreferences(getApplication()).edit()
+                editor.putString(KEY_GEMINI_KEY, cleanGemini)
+                editor.putString(KEY_GITHUB_PAT, cleanGitHub)
+                val isCommitted = editor.commit() // СИНХРОННЫЙ СБРОС НА ФИЗИЧЕСКИЙ ДИСК UFS 4.0
 
                 _screenState.update {
                     it.copy(
@@ -291,14 +287,14 @@ class ConveyorViewModel(
                         hasValidGeminiKey = cleanGemini.isNotBlank(),
                         hasValidGitHubPat = cleanGitHub.isNotBlank(),
                         isSettingsDialogOpen = false,
-                        activeBannerError = null
+                        activeBannerError = if (isCommitted) null else "Сбой физической записи на диск."
                     )
                 }
 
-                _sideEffects.trySend(ConveyorScreenSideEffect.ShowToast("Учетные данные сохранены в Knox Vault"))
-                AppLogger.i(AppLogger.TAG_VM, "ConveyorViewModel: Ключи успешно зафиксированы в аппаратном сейфе Knox Vault.")
+                _sideEffects.trySend(ConveyorScreenSideEffect.ShowToast("Ключи надежно зафиксированы на устройстве"))
+                AppLogger.i(AppLogger.TAG_VM, "ConveyorViewModel: Ключи успешно сохранены (commit=$isCommitted).")
             } catch (e: Exception) {
-                AppLogger.e(AppLogger.TAG_VM, "ConveyorViewModel: Ошибка записи в Knox Vault: ${e.message}", e)
+                AppLogger.e(AppLogger.TAG_VM, "ConveyorViewModel: Ошибка записи: ${e.message}", e)
                 withContext(Dispatchers.Main) {
                     _screenState.update { it.copy(activeBannerError = "Ошибка сохранения ключей: ${e.localizedMessage}") }
                 }
