@@ -9,6 +9,7 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.utils.io.jvm.javaio.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -764,7 +765,7 @@ class GitHubEngine(
 
             delay(pollIntervalMs)
         }
-        throw CancellationException("Опрос сборки был отменен")
+        throw kotlinx.coroutines.CancellationException("Опрос сборки был отменен")
     }
 
     suspend fun getWorkflowRunJobs(owner: String, repo: String, runId: Long): List<GitHubJobDto> = withContext(Dispatchers.IO) {
@@ -830,7 +831,7 @@ class GitHubEngine(
                 if (!s3Response.status.isSuccess()) {
                     throw GitHubApiException(s3Response.status, "Ошибка выкачки лога из S3: ${s3Response.status}")
                 }
-                downloadBlock(s3Response.bodyAsChannel().toInputStream())
+                streamBlock(s3Response.bodyAsChannel().toInputStream())
             }
         } else {
             streamBlock(initialResponse.bodyAsChannel().toInputStream())
