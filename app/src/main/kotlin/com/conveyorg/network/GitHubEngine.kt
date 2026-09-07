@@ -781,7 +781,7 @@ class GitHubEngine(
             }
 
             if (System.currentTimeMillis() - startTime > timeoutMs) {
-                throw TimeoutCancellationException("Превышено время ожидания сборки CI ($timeoutMs мс)")
+                throw GitHubApiException(HttpStatusCode.GatewayTimeout, "Превышено время ожидания сборки CI ($timeoutMs мс)")
             }
 
             delay(pollIntervalMs)
