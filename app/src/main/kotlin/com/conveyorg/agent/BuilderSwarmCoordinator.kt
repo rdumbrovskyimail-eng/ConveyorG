@@ -199,7 +199,7 @@ class BuilderSwarmCoordinator(
         private const val CONCURRENCY_PERMITS = 10 // Максимум 10 параллельных сетевых сокетов
 
         private const val LITE_MODEL_NAME = "gemini-3.5-flash-lite"
-        private const val API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+        private const val API_BASE_URL = "https://aiplatform.googleapis.com/v1/publishers/google/models"
         private const val WORKER_TIMEOUT_MS = 90_000L
 
         @OptIn(ExperimentalSerializationApi::class)
@@ -657,7 +657,7 @@ class BuilderSwarmCoordinator(
         history: List<LiteContentDto>
     ): LiteUnaryResponse = withContext(Dispatchers.IO) {
         val apiKey = apiKeyProvider().trim()
-        val url = "$API_BASE_URL/models/$LITE_MODEL_NAME:generateContent?key=$apiKey"
+        val url = "$API_BASE_URL/$LITE_MODEL_NAME:generateContent?key=$apiKey"
 
         val sandboxTools = listOf(
             GeminiToolDto(
@@ -703,6 +703,7 @@ class BuilderSwarmCoordinator(
         )
 
         val response = httpClient.post(url) {
+            header("x-goog-api-key", apiKey)
             contentType(ContentType.Application.Json)
             setBody(json.encodeToString(LiteWireRequest.serializer(), payload))
         }
