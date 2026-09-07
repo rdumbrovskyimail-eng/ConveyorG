@@ -1,4 +1,4 @@
-name: CI - Build ClientG APK
+name: CI - Build conveyorg APK
 
 on:
   push:
@@ -11,7 +11,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Принцип наименьших привилегий (Least Privilege)
 permissions:
   contents: read
 
@@ -32,27 +31,22 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      # Делаем gradlew исполняемым до вызова действий сборщика
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      # Официальный экшен Gradle с управлением кэшем
-      # Валидация выключена, так как встроенный SHA-256 хук gradlew сам проверяет целостность JAR
       - name: Setup Gradle & Cache
         uses: gradle/actions/setup-gradle@v4
         with:
           validate-wrappers: false
           cache-read-only: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
 
-      # Сборка Debug APK с детальным трейсингом ошибок
       - name: Build Debug APK
         run: ./gradlew :app:assembleDebug --stacktrace
 
-      # Прикрепляем готовый APK с контролем обязательного наличия файла
       - name: Upload Verified Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: ClientG-Debug-${{ github.sha }}
+          name: conveyorg-Debug-${{ github.sha }}
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
