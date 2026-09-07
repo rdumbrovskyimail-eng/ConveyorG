@@ -39,7 +39,8 @@ data class ParameterPropertyDto(
     val type: String, // "STRING", "INTEGER", "BOOLEAN", "ARRAY", "OBJECT"
     val description: String,
     val enum: List<String>? = null,
-    val items: ParameterPropertyDto? = null
+    val items: ParameterPropertyDto? = null,
+    val properties: Map<String, ParameterPropertyDto>? = null
 )
 
 @Serializable
