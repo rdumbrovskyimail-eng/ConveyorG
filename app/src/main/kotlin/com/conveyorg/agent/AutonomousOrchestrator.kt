@@ -222,7 +222,7 @@ class AutonomousOrchestrator(
         maxRepairRounds: Int = 3,
         existingWorkspaceManager: LocalWorkspaceManager? = null,
         existingGitHubEngine: GitHubEngine? = null,
-        existingToolBridge: CompositeOrchestratorToolBridge? = null
+        existingToolBridge: OrchestratorBridge? = null
     ): AutonomousTaskResult = withContext(Dispatchers.IO) {
         loopMutex.withLock {
             val sessionId = existingWorkspaceManager?.sessionId ?: UUID.randomUUID().toString()
@@ -243,19 +243,7 @@ class AutonomousOrchestrator(
 
             val workspaceManager = existingWorkspaceManager ?: LocalWorkspaceManager(sessionId, context)
             val gitHubEngine = existingGitHubEngine ?: GitHubEngine(tokenProvider = gitHubTokenProvider, httpClient = httpClient, shouldCloseHttpClient = false)
-            val effectiveBridge: Any = existingToolBridge ?: OrchestratorToolBridge(workspaceManager, gitHubEngine)
-
-            fun getBridgeDeclarations(): GeminiToolDto = when (effectiveBridge) {
-                is CompositeOrchestratorToolBridge -> effectiveBridge.getToolDeclarations()
-                is OrchestratorToolBridge -> effectiveBridge.getToolDeclarations()
-                else -> throw IllegalStateException("Неизвестный мост инструментов")
-            }
-
-            suspend fun dispatchBridgeCall(call: FunctionCallDto, thoughtSig: String?): FunctionResponsePartDto = when (effectiveBridge) {
-                is CompositeOrchestratorToolBridge -> effectiveBridge.dispatchToolCall(call, thoughtSig)
-                is OrchestratorToolBridge -> effectiveBridge.dispatchToolCall(call, thoughtSig)
-                else -> throw IllegalStateException("Неизвестный мост инструментов")
-            }
+            val toolBridge: OrchestratorBridge = existingToolBridge ?: OrchestratorToolBridge(workspaceManager, gitHubEngine)
 
             var isTaskSucceeded = false
             var finalMessage = ""
@@ -303,7 +291,7 @@ class AutonomousOrchestrator(
                     val modelTurn = executeGeminiTurnWithRetry(
                         systemPrompt = systemPrompt,
                         history = conversationHistory,
-                        toolDeclarations = getBridgeDeclarations(),
+                        toolDeclarations = toolBridge.getToolDeclarations(),
                         thinkingLevel = nextThinkingLevel
                     )
 
@@ -361,13 +349,11 @@ class AutonomousOrchestrator(
                             }
                             continue
                         } else {
-                            // Если задача была информационной или исследовательской — это успешное завершение
                             isTaskSucceeded = true
                             break
                         }
                     }
 
-                    // АДАПТИВНОЕ МЫШЛЕНИЕ: для простых чтений файлов переключаем следующий шаг на LOW для ускорения
                     val firstCall = functionCalls.first()
                     nextThinkingLevel = when (firstCall.name) {
                         "workspace_get_tree", "workspace_read_file", "workspace_search_symbol" -> "LOW"
@@ -391,7 +377,6 @@ class AutonomousOrchestrator(
                         recentToolCalls.addLast(callFingerprint)
                         if (recentToolCalls.size > 5) recentToolCalls.removeFirst()
 
-                        // АКТИВНЫЙ LOOP BREAKER: прерываем петлю одинаковых запросов
                         if (recentToolCalls.size >= 3 && recentToolCalls.takeLast(3).all { it == callFingerprint }) {
                             AppLogger.w(AppLogger.TAG_APP, "AutonomousOrchestrator: Обнаружена петля зацикливания на '${call.name}'!")
                             conversationHistory.add(
@@ -402,7 +387,7 @@ class AutonomousOrchestrator(
                             )
                         }
 
-                        val toolResponsePart = dispatchBridgeCall(call, thoughtSig)
+                        val toolResponsePart = toolBridge.dispatchToolCall(call, thoughtSig)
 
                         if (call.name == "github_push_atomic_commit") {
                             val pushOutput = toolResponsePart.functionResponse.response["output"]?.jsonObject
