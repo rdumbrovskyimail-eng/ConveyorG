@@ -43,8 +43,8 @@ import kotlin.random.Random
 // ====================================================================
 
 enum class BuilderRole {
-    PRIMARY_A,        // Основной строитель (10 этапов x 10%, автономен)
-    CROSS_CUTTING_B   // Сквозной строитель (ждет отчета предшественника по закону A -> B)
+    PRIMARY_A,
+    CROSS_CUTTING_B
 }
 
 enum class BuilderStatus {
@@ -196,7 +196,7 @@ class BuilderSwarmCoordinator(
         const val MAX_TOTAL_BUILDERS = 20
         const val MAX_PRIMARY_BUILDERS_A = 10
         const val MAX_CROSS_BUILDERS_B = 10
-        private const val CONCURRENCY_PERMITS = 10 // Максимум 10 параллельных сетевых сокетов
+        private const val CONCURRENCY_PERMITS = 10
 
         private const val LITE_MODEL_NAME = "gemini-3.5-flash-lite"
         private const val API_BASE_URL = "https://aiplatform.googleapis.com/v1/publishers/google/models"
@@ -234,29 +234,19 @@ class BuilderSwarmCoordinator(
 
     private val coordinatorScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // Реестры задач, сигналов эстафеты и собранных отчетов
     private val registeredTasks = ConcurrentHashMap<String, BuilderTask>()
     private val taskSignals = ConcurrentHashMap<String, CompletableDeferred<BuilderReport>>()
     private val collectedReports = CopyOnWriteArrayList<BuilderReport>()
 
-    // Семафор управления квотами Google API
     private val concurrencySemaphore = Semaphore(CONCURRENCY_PERMITS)
     private val registrationMutex = Mutex()
 
-    // Атомарный счетчик барьера
     private val atomicRemainingBarrier = AtomicInteger(0)
     private var barrierDeferred = CompletableDeferred<AllReportsManifest>()
     private val failedPrimaryTasksCount = AtomicInteger(0)
 
     private val swarmStartTime = System.currentTimeMillis()
 
-    // ====================================================================
-    // 4. Регистрация Задач (Соблюдение Квоты 10A + 10B = 20)
-    // ====================================================================
-
-    /**
-     * Регистрация Основного Билдера A (Класс A: автономен, 10 этапов x 10%).
-     */
     suspend fun registerPrimaryBuilderA(
         stageNumber: Int,
         targetFile: String,
@@ -296,7 +286,6 @@ class BuilderSwarmCoordinator(
         }
         _events.emit(SwarmEvent.TaskRegistered(taskId, BuilderRole.PRIMARY_A, targetFile))
 
-        // Запуск воркера в изолированной корутине
         coordinatorScope.launch {
             executeWorkerLifecycle(task, signal)
         }
@@ -304,9 +293,6 @@ class BuilderSwarmCoordinator(
         taskId
     }
 
-    /**
-     * Регистрация Сквозного Билдера B (Класс B: строго зависит от предшественника по закону A -> B).
-     */
     suspend fun registerCrossCuttingBuilderB(
         dependencyTaskId: String,
         stageNumber: Int,
@@ -356,13 +342,6 @@ class BuilderSwarmCoordinator(
         taskId
     }
 
-    // ====================================================================
-    // 5. Запечатывание Барьера и Ожидание «Зеленой Лампочки»
-    // ====================================================================
-
-    /**
-     * Директива Оркестратора на запечатывание барьера на N отчетов (N <= 20).
-     */
     suspend fun sealBarrier(expectedCount: Int): Boolean = registrationMutex.withLock {
         check(expectedCount in 1..MAX_TOTAL_BUILDERS) {
             "Недопустимое значение барьера: $expectedCount (Лимит 1..$MAX_TOTAL_BUILDERS)"
@@ -371,6 +350,10 @@ class BuilderSwarmCoordinator(
         val completedNow = collectedReports.size
         val remaining = maxOf(0, expectedCount - completedNow)
         atomicRemainingBarrier.set(remaining)
+
+        if (barrierDeferred.isCompleted) {
+            barrierDeferred = CompletableDeferred()
+        }
 
         _state.update {
             it.copy(
@@ -395,24 +378,18 @@ class BuilderSwarmCoordinator(
         }
     }
 
-    // ====================================================================
-    // 6. Жизненный Цикл Воркера 3.5 Flash-Lite (Закон A -> B и Песочница)
-    // ====================================================================
-
     private suspend fun executeWorkerLifecycle(
         task: BuilderTask,
         taskSignal: CompletableDeferred<BuilderReport>
     ) {
         val workerStartTime = System.currentTimeMillis()
 
-        // 1. Соблюдение Закона A -> B: ожидание предшественника для задач Класса B
         if (task.role == BuilderRole.CROSS_CUTTING_B && task.dependencyTaskId != null) {
             _events.emit(SwarmEvent.TaskAwaitingDependency(task.taskId, task.dependencyTaskId))
             val parentSignal = taskSignals[task.dependencyTaskId]
 
             val parentReport = parentSignal?.await()
             if (parentReport == null || parentReport.status != BuilderStatus.SUCCESS.name) {
-                // КАСКАДНЫЙ СБРОС: предшественник упал -> сквозной воркер аннулируется без запуска
                 AppLogger.w(AppLogger.TAG_APP, "SwarmWorker [${task.taskId}]: Предшественник упал. Аннулирование по закону A -> B.")
                 val abortReport = BuilderReport(
                     taskId = task.taskId,
@@ -429,7 +406,6 @@ class BuilderSwarmCoordinator(
             }
         }
 
-        // 2. Вход в сетевое окно через семафор
         concurrencySemaphore.withPermit {
             _state.update { it.copy(activeWorkersCount = it.activeWorkersCount + 1) }
             _events.emit(SwarmEvent.TaskStarted(task.taskId, task.role))
@@ -461,9 +437,6 @@ class BuilderSwarmCoordinator(
         }
     }
 
-    /**
-     * Быстрый ReAct цикл воркера 3.5 Flash-Lite в изолированной песочнице (максимум 5 шагов).
-     */
     private suspend fun runWorkerReActLoop(task: BuilderTask, startTime: Long): BuilderReport {
         val systemPrompt = "Ты — быстрый инженер-сборщик ClientG на базе Gemini 3.5 Flash-Lite.\n" +
                 "Твоя цель: реализовать подзадачу строго для файла '${task.targetFile}'.\n" +
@@ -503,7 +476,6 @@ class BuilderSwarmCoordinator(
             if (functionCall != null) {
                 conversation.add(LiteContentDto(role = "model", parts = listOf(LitePartDto(functionCall = functionCall))))
 
-                // Исполнение в локальной песочнице
                 val toolResult = when (functionCall.name) {
                     "sandbox_read_file" -> {
                         val path = functionCall.args["path"]?.jsonPrimitive?.content ?: task.targetFile
@@ -517,13 +489,11 @@ class BuilderSwarmCoordinator(
                         val path = functionCall.args["path"]?.jsonPrimitive?.content ?: task.targetFile
                         val content = functionCall.args["content"]?.jsonPrimitive?.content ?: ""
 
-                        // Очистка от случайных Markdown-тегов ```kotlin
-                        val cleanContent = content.removePrefix("```kotlin")
-                            .removePrefix("```")
-                            .removeSuffix("```")
+                        val cleanContent = content.trim()
+                            .replace(Regex("^```[a-zA-Z0-9_-]*\\r?\\n"), "")
+                            .replace(Regex("\\r?\\n```$"), "")
                             .trim()
 
-                        // Запись через атомарный менеджер с пофайловым мьютексом
                         workspaceManager.writeFileAtomic(path, cleanContent.toByteArray(Charsets.UTF_8))
                         if (path !in touchedFiles) touchedFiles.add(path)
 
@@ -560,7 +530,6 @@ class BuilderSwarmCoordinator(
                     )
                 )
             } else {
-                // Модель закончила без явного вызова submit_report
                 break
             }
         }
@@ -585,7 +554,6 @@ class BuilderSwarmCoordinator(
         signal.complete(report)
         collectedReports.add(report)
 
-        // Проверка предохранителя роя (Swarm Circuit Breaker)
         if (failedPrimaryTasksCount.get() >= 3) {
             _state.update { it.copy(circuitBreakerTripped = true) }
             _events.emit(SwarmEvent.CircuitBreakerTripped("Слишком много сбоев основных задач A (>= 3). Волна прервана."))
@@ -601,7 +569,6 @@ class BuilderSwarmCoordinator(
         }
         _events.emit(SwarmEvent.ReportSubmitted(report.taskId, BuilderStatus.valueOf(report.status), maxOf(0, remaining)))
 
-        // Проверка достижения «Зеленой лампочки»
         if (_state.value.isSealed && remaining <= 0) {
             triggerGreenLight()
         }
@@ -629,10 +596,6 @@ class BuilderSwarmCoordinator(
         }
         AppLogger.i(AppLogger.TAG_APP, "SwarmCoordinator: 🟢 ЗЕЛЕНАЯ ЛАМПОЧКА ВСПЫХНУЛА! Манифест готов (${manifest.totalCompleted} отчетов).")
     }
-
-    // ====================================================================
-    // 7. Сверхбыстрый Unary REST Вызов к Gemini 3.5 Flash-Lite
-    // ====================================================================
 
     private suspend fun executeLiteUnaryWithRetry(
         systemPrompt: String,
@@ -713,6 +676,10 @@ class BuilderSwarmCoordinator(
         }
 
         json.decodeFromString(LiteUnaryResponse.serializer(), response.bodyAsText())
+    }
+
+    fun getBurnedTokensSnapshot(): Long {
+        return collectedReports.sumOf { (it.promptTokens + it.candidateTokens).toLong() }
     }
 
     override fun close() {
