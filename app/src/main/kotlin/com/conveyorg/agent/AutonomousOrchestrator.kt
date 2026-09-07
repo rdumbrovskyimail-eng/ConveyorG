@@ -13,6 +13,7 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -356,7 +357,7 @@ class AutonomousOrchestrator(
 
                         _state.update {
                             it.copy(
-                                completedToolCount = it.completedToolCount + 1,
+                                completedToolsCount = it.completedToolsCount + 1,
                                 activeToolName = null
                             )
                         }
