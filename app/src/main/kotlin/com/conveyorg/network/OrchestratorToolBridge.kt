@@ -72,13 +72,22 @@ data class ToolExecutionResult(
 )
 
 // ====================================================================
-// 2. Эталонный Мост Инструментов: OrchestratorToolBridge
+// 2. Базовый Контракт Моста Инструментов
+// ====================================================================
+
+interface OrchestratorBridge {
+    fun getToolDeclarations(): GeminiToolDto
+    suspend fun dispatchToolCall(call: FunctionCallDto, thoughtSignature: String? = null): FunctionResponsePartDto
+}
+
+// ====================================================================
+// 3. Эталонный Мост Инструментов: OrchestratorToolBridge
 // ====================================================================
 
 class OrchestratorToolBridge(
     private val workspaceManager: LocalWorkspaceManager,
     private val gitHubEngine: GitHubEngine
-) {
+) : OrchestratorBridge {
 
     companion object {
         private const val TOOL_EXECUTION_TIMEOUT_MS = 90_000L
@@ -93,7 +102,7 @@ class OrchestratorToolBridge(
         }
     }
 
-    fun getToolDeclarations(): GeminiToolDto {
+    override fun getToolDeclarations(): GeminiToolDto {
         return GeminiToolDto(
             functionDeclarations = listOf(
                 FunctionDeclarationDto(
@@ -269,9 +278,9 @@ class OrchestratorToolBridge(
         )
     }
 
-    suspend fun dispatchToolCall(
+    override suspend fun dispatchToolCall(
         call: FunctionCallDto,
-        thoughtSignature: String? = null
+        thoughtSignature: String?
     ): FunctionResponsePartDto = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         AppLogger.i(AppLogger.TAG_ENGINE, "ToolBridge: Запуск вызова инструмента '${call.name}' (id=${call.id})...")
