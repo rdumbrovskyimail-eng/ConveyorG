@@ -91,7 +91,7 @@ internal data class UpdateRefRequest(
 @Serializable
 internal data class CreateBlobRequest(
     val content: String,
-    val encoding: String // "utf-8" или "base64"
+    val encoding: String
 )
 
 @Serializable
@@ -103,8 +103,8 @@ data class CreateBlobResponse(
 @Serializable
 data class GitTreeEntryDto(
     val path: String,
-    val mode: String, // "100644" (файл), "100755" (gradlew), "040000" (папка)
-    val type: String, // "blob" или "tree"
+    val mode: String,
+    val type: String,
     val sha: String? = null,
     val content: String? = null
 )
@@ -150,7 +150,7 @@ data class GitHubCompareDto(
 @Serializable
 data class GitHubCompareFileDto(
     val filename: String,
-    val status: String, // "added", "modified", "removed"
+    val status: String,
     val additions: Int = 0,
     val deletions: Int = 0,
     val changes: Int = 0,
@@ -183,8 +183,8 @@ data class GitHubWorkflowRunDto(
     val name: String? = null,
     @SerialName("head_branch") val headBranch: String? = null,
     @SerialName("head_sha") val headSha: String? = null,
-    val status: String, // "queued", "in_progress", "completed"
-    val conclusion: String? = null, // "success", "failure", "cancelled", "timed_out"
+    val status: String,
+    val conclusion: String? = null,
     @SerialName("html_url") val htmlUrl: String = "",
     @SerialName("created_at") val createdAt: String = "",
     @SerialName("updated_at") val updatedAt: String = ""
@@ -244,7 +244,7 @@ internal data class CreatePullRequestPayload(
 internal data class MergePullRequestPayload(
     @SerialName("commit_title") val commitTitle: String?,
     @SerialName("commit_message") val commitMessage: String?,
-    @SerialName("merge_method") val mergeMethod: String // "merge", "squash", "rebase"
+    @SerialName("merge_method") val mergeMethod: String
 )
 
 @Serializable
@@ -394,10 +394,6 @@ class GitHubEngine(
         )
     }
 
-    // ====================================================================
-    // 4. Домен 1: Репозитории, Ветки и Сравнение
-    // ====================================================================
-
     suspend fun getRepository(owner: String, repo: String): GitHubRepositoryDto = withContext(Dispatchers.IO) {
         val token = getAuthToken()
         val response = httpClient.get("$API_BASE_URL/repos/$owner/$repo") {
@@ -466,10 +462,6 @@ class GitHubEngine(
         json.decodeFromString(GitHubCompareDto.serializer(), response.bodyAsText())
     }
 
-    // ====================================================================
-    // 5. Домен 2: Zipball Snapshot Engine (Безопасная распаковка без Zip Slip)
-    // ====================================================================
-
     suspend fun downloadAndUnpackZipball(
         owner: String,
         repo: String,
@@ -483,7 +475,6 @@ class GitHubEngine(
         val endpoint = "$API_BASE_URL/repos/$owner/$repo/zipball/$ref"
         AppLogger.i(AppLogger.TAG_NET, "GitHubEngine: Запрос zipball архива репозитория $owner/$repo ($ref)...")
 
-        // 1. Ручной перехват 302-редиректа для изоляции Amazon S3 от Bearer токена
         val initialResponse = httpClient.prepareGet(endpoint) {
             applyStandardHeaders(token)
         }.execute()
@@ -500,20 +491,17 @@ class GitHubEngine(
             }
         }
 
-        // 2. Стриминг бинарного потока (чистым сокетом без Authorization при редиректе на S3)
         val downloadBlock: suspend (InputStream) -> Unit = { inputStream ->
             ZipInputStream(inputStream).use { zipIn ->
                 var entry = zipIn.nextEntry
                 while (entry != null) {
                     val entryName = entry.name
-                    // Отсекаем корневой динамический каталог GitHub (<repo>-<sha>/)
                     val segments = entryName.split('/')
                     if (segments.size > 1) {
                         val relativePath = segments.drop(1).joinToString("/")
                         if (relativePath.isNotBlank()) {
                             val destFile = File(canonicalTargetDir, relativePath).canonicalFile
 
-                            // Защита от уязвимости Zip Slip (CWE-22)
                             if (!destFile.path.startsWith(canonicalTargetDir.path + File.separator) && destFile != canonicalTargetDir) {
                                 throw SecurityException("Обнаружена попытка выхода за пределы рабочей директории (Zip Slip): $entryName")
                             }
@@ -530,7 +518,6 @@ class GitHubEngine(
                                     }
                                 }
 
-                                // Восстановление POSIX прав на исполнение скриптов в Linux/Android
                                 val fileName = destFile.name
                                 if (fileName == "gradlew" || fileName.endsWith(".sh")) {
                                     destFile.setExecutable(true, false)
@@ -559,10 +546,6 @@ class GitHubEngine(
         AppLogger.i(AppLogger.TAG_NET, "GitHubEngine: Репозиторий успешно распакован в ${canonicalTargetDir.absolutePath}")
         canonicalTargetDir
     }
-
-    // ====================================================================
-    // 6. Домен 3: Низкоуровневый Git Database API и Атомарный Пуш
-    // ====================================================================
 
     suspend fun createBlob(owner: String, repo: String, contentBytes: ByteArray, isBinary: Boolean): String = withContext(Dispatchers.IO) {
         val token = getAuthToken()
@@ -625,28 +608,24 @@ class GitHubEngine(
         json.decodeFromString(GitHubCommitResponseDto.serializer(), response.bodyAsText())
     }
 
-    /**
-     * Атомарная фиксация множества измененных локальных файлов в ветку GitHub одним коммитом.
-     */
     suspend fun pushAtomicCommit(
         owner: String,
         repo: String,
         branch: String,
         commitMessage: String,
-        modifiedFiles: Map<String, ByteArray>
+        modifiedFiles: Map<String, ByteArray>,
+        deletedFiles: List<String> = emptyList()
     ): PushResult = withContext(Dispatchers.IO) {
-        if (modifiedFiles.isEmpty()) {
-            throw IllegalArgumentException("Список измененных файлов пуст. Нечего коммитить.")
+        if (modifiedFiles.isEmpty() && deletedFiles.isEmpty()) {
+            throw IllegalArgumentException("Список измененных и удаленных файлов пуст. Нечего коммитить.")
         }
 
-        AppLogger.i(AppLogger.TAG_NET, "GitHubEngine: Старт атомарного пуша (${modifiedFiles.size} файлов) в $branch...")
+        AppLogger.i(AppLogger.TAG_NET, "GitHubEngine: Старт атомарного пуша (${modifiedFiles.size} изм, ${deletedFiles.size} уд) в $branch...")
 
-        // 1. Получаем текущий HEAD ветки
         val cleanBranch = branch.removePrefix("refs/heads/").removePrefix("heads/")
         val headRef = getRef(owner, repo, "heads/$cleanBranch")
         val parentCommitSha = headRef.targetObject.sha
 
-        // 2. Получаем SHA базового дерева родительского коммита
         val token = getAuthToken()
         val commitResponse = httpClient.get("$API_BASE_URL/repos/$owner/$repo/git/commits/$parentCommitSha") {
             applyStandardHeaders(token)
@@ -656,9 +635,8 @@ class GitHubEngine(
         val baseTreeSha = parentCommitDto.tree?.sha
             ?: throw IllegalStateException("Не удалось получить базовое дерево родительского коммита $parentCommitSha")
 
-        // 3. Параллельная загрузка Blobs на GitHub
         val binaryExtensions = setOf("png", "jpg", "jpeg", "webp", "jar", "so", "class", "keystore", "jks", "zip", "ico")
-        val treeEntries = coroutineScope {
+        val modifiedEntries = coroutineScope {
             modifiedFiles.map { (path, bytes) ->
                 async {
                     val ext = path.substringAfterLast('.', "").lowercase()
@@ -678,10 +656,18 @@ class GitHubEngine(
             }.awaitAll()
         }
 
-        // 4. Построение нового дерева относительно базового base_tree
+        val deletedEntries = deletedFiles.map { path ->
+            GitTreeEntryDto(
+                path = path.replace('\\', '/').removePrefix("/"),
+                mode = "100644",
+                type = "blob",
+                sha = null
+            )
+        }
+
+        val treeEntries = modifiedEntries + deletedEntries
         val newTree = createTree(owner, repo, baseTreeSha = baseTreeSha, entries = treeEntries)
 
-        // 5. Создание чистого коммита
         val newCommit = createCommit(
             owner = owner,
             repo = repo,
@@ -690,7 +676,6 @@ class GitHubEngine(
             parentsSha = listOf(parentCommitSha)
         )
 
-        // 6. Fast-Forward сдвиг ветки
         updateRef(owner, repo, "heads/$cleanBranch", newCommit.sha, force = false)
 
         AppLogger.i(AppLogger.TAG_NET, "GitHubEngine: УСПЕХ! Зафиксирован атомарный коммит ${newCommit.sha} в ветке $cleanBranch")
@@ -698,14 +683,10 @@ class GitHubEngine(
         PushResult(
             commitSha = newCommit.sha,
             treeSha = newTree.sha,
-            updatedFilesCount = modifiedFiles.size,
+            updatedFilesCount = modifiedFiles.size + deletedFiles.size,
             branch = cleanBranch
         )
     }
-
-    // ====================================================================
-    // 7. Домен 4: GitHub Actions и CI/CD Конвейер
-    // ====================================================================
 
     suspend fun listWorkflows(owner: String, repo: String): List<GitHubWorkflowDto> = withContext(Dispatchers.IO) {
         val token = getAuthToken()
@@ -755,15 +736,12 @@ class GitHubEngine(
         parsed.workflowRuns
     }
 
-    /**
-     * Интеллектуальный опрос завершения сборки CI (Polling)
-     */
     suspend fun pollWorkflowRunConclusion(
         owner: String,
         repo: String,
         runId: Long,
         pollIntervalMs: Long = 6000L,
-        timeoutMs: Long = 600_000L // 10 минут максимум
+        timeoutMs: Long = 600_000L
     ): GitHubWorkflowRunDto = withContext(Dispatchers.IO) {
         val token = getAuthToken()
         val startTime = System.currentTimeMillis()
@@ -799,9 +777,6 @@ class GitHubEngine(
         parsed.jobs
     }
 
-    /**
-     * Потоковое скачивание сырого лога упавшей задачи сборки с извлечением ошибок компилятора kotlinc
-     */
     suspend fun downloadJobFailureLog(owner: String, repo: String, jobId: Long): String = withContext(Dispatchers.IO) {
         val token = getAuthToken()
         val endpoint = "$API_BASE_URL/repos/$owner/$repo/actions/jobs/$jobId/logs"
@@ -837,7 +812,7 @@ class GitHubEngine(
 
                 if (isInsideCompilationError) {
                     errorContextLines.add(line)
-                    if (errorContextLines.size >= 120) { // Лимит 120 строк самых важных ошибок
+                    if (errorContextLines.size >= 120) {
                         isInsideCompilationError = false
                     }
                 }
@@ -855,7 +830,7 @@ class GitHubEngine(
                 if (!s3Response.status.isSuccess()) {
                     throw GitHubApiException(s3Response.status, "Ошибка выкачки лога из S3: ${s3Response.status}")
                 }
-                streamBlock(s3Response.bodyAsChannel().toInputStream())
+                downloadBlock(s3Response.bodyAsChannel().toInputStream())
             }
         } else {
             streamBlock(initialResponse.bodyAsChannel().toInputStream())
@@ -881,10 +856,6 @@ class GitHubEngine(
         checkResponseErrors(response)
         true
     }
-
-    // ====================================================================
-    // 8. Домен 5: Pull Requests и Слияния
-    // ====================================================================
 
     suspend fun createPullRequest(
         owner: String,
@@ -947,10 +918,6 @@ class GitHubEngine(
         json.decodeFromString(GitHubMergeResultDto.serializer(), response.bodyAsText())
     }
 
-    // ====================================================================
-    // 9. Домен 6: Поиск и Артефакты
-    // ====================================================================
-
     suspend fun searchCode(owner: String, repo: String, query: String): List<GitHubCodeSearchItemDto> = withContext(Dispatchers.IO) {
         val token = getAuthToken()
         val qualifiedQuery = "$query repo:$owner/$repo"
@@ -972,10 +939,6 @@ class GitHubEngine(
         val parsed = json.decodeFromString(ArtifactsResponse.serializer(), response.bodyAsText())
         parsed.artifacts
     }
-
-    // ====================================================================
-    // 10. Домен 7: Универсальный Шлюз (The 100% Escape Hatch)
-    // ====================================================================
 
     suspend fun executeRawRest(
         method: String,
