@@ -48,6 +48,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.conveyorg.agent.BuilderCardUiModel
 import com.conveyorg.agent.BuilderRole
 import com.conveyorg.agent.BuilderStatus
 import com.conveyorg.agent.OrchestratorPhase
