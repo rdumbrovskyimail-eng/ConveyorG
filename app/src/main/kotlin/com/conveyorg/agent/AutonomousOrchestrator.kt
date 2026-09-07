@@ -110,7 +110,7 @@ internal data class AgentSystemInstructionDto(val parts: List<AgentPartDto>)
 
 @Serializable
 internal data class AgentContentDto(
-    val role: String, // "user", "model", "tool"
+    val role: String,
     val parts: List<AgentPartDto>
 )
 
@@ -424,7 +424,7 @@ class AutonomousOrchestrator(
                     }
                 }
 
-            } catch (e: CancellationException) {
+            } catch (e: kotlinx.coroutines.CancellationException) {
                 AppLogger.w(AppLogger.TAG_APP, "AutonomousOrchestrator: Миссия отменена пользователем.")
                 finalMessage = "Задача принудительно остановлена пользователем."
                 _state.update { it.copy(phase = OrchestratorPhase.CANCELLED, statusMessage = finalMessage) }
@@ -477,7 +477,7 @@ class AutonomousOrchestrator(
             try {
                 return executeSingleGeminiTurn(systemPrompt, history, toolDeclarations)
             } catch (e: Exception) {
-                if (e is CancellationException) throw e
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 attempt++
                 if (attempt >= 4) throw e
 
