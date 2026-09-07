@@ -17,7 +17,6 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Чистая 64-битная среда: оптимизация под Snapdragon 8 Gen 2 и эмуляторы x86_64
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
@@ -32,7 +31,6 @@ android {
             )
         }
         debug {
-            // Отключаем ресурсоемкое сжатие PNG при отладочной сборке
             isCrunchPngs = false
         }
     }
@@ -51,7 +49,6 @@ android {
 
     packaging {
         resources {
-            // Исключение дублирующихся метаданных Ktor CIO и Coroutines
             excludes += listOf(
                 "/META-INF/{AL2.0,LGPL2.1}",
                 "/META-INF/INDEX.LIST",
@@ -83,6 +80,7 @@ dependencies {
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons)
+    implementation(libs.androidx.compose.material.icons.extended)
 
     // --- Асинхронность и потоки (Coroutines) ---
     implementation(libs.kotlinx.coroutines.core)
@@ -99,7 +97,6 @@ dependencies {
     implementation(libs.androidx.security.crypto)
 }
 
-// Ленивое отключение проверки метаданных AAR без обращения к внутренним пакетам AGP
 tasks.configureEach {
     if (name.contains("AarMetadata")) {
         enabled = false
