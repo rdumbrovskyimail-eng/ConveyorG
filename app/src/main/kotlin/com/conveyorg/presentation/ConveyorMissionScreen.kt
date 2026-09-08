@@ -6,12 +6,10 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -31,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -38,13 +37,13 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -103,7 +102,8 @@ fun ConveyorMissionScreen(
     val mainScrollState = rememberScrollState()
     val gridState = rememberLazyGridState()
 
-    // Обработка системных тактильных сигналов и уведомлений
+    var showReportDialog by remember { mutableStateOf(false) }
+
     LaunchedEffect(Unit) {
         viewModel.sideEffects.collect { effect ->
             when (effect) {
@@ -129,11 +129,11 @@ fun ConveyorMissionScreen(
         }
     }
 
-    // Системный жест "Назад": сворачивание карточки, диалога или отмена
     BackHandler(
-        enabled = state.expandedBuilderTaskId != null || state.isSettingsDialogOpen || state.mission.isRunning
+        enabled = state.expandedBuilderTaskId != null || state.isSettingsDialogOpen || state.mission.isRunning || showReportDialog
     ) {
         when {
+            showReportDialog -> showReportDialog = false
             state.expandedBuilderTaskId != null -> viewModel.onCollapseExpandedCard()
             state.isSettingsDialogOpen -> viewModel.onCloseSettingsDialog()
             state.mission.isRunning -> viewModel.onCancelMission()
@@ -150,15 +150,14 @@ fun ConveyorMissionScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(mainScrollState)
-                .padding(bottom = 90.dp) // Запас под нижнюю капсулу ввода
+                .padding(bottom = 90.dp)
         ) {
-            // 1. СИСТЕМНЫЙ СТАТУС-БАР (ХЕДЕР)
+            // 1. Хедер
             MissionHeaderBar(
                 state = state,
                 onOpenSettings = { viewModel.onOpenSettingsDialog() }
             )
 
-            // Баннер ошибок (если есть)
             AnimatedVisibility(visible = state.activeBannerError != null) {
                 ErrorBannerCard(
                     errorMessage = state.activeBannerError ?: "",
@@ -166,15 +165,16 @@ fun ConveyorMissionScreen(
                 )
             }
 
-            // 2. ВЕРХНИЙ МОНОЛИТНЫЙ КВАДРАТ ОРКЕСТРАТОРА (GEMINI 3.8 FLASH)
+            // 2. Монолитный квадрат Оркестратора
             OrchestratorMonolithCard(
                 state = state,
+                onOpenReport = { showReportDialog = true },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 14.dp, vertical = 6.dp)
             )
 
-            // 3. РАНДЕВУ-БАР: 🟢 ГЛАВНАЯ ЗЕЛЕНАЯ ЛАМПА И ДИНАМИЧЕСКИЙ БАРЬЕР
+            // 3. Рандеву-Бар
             RendezvousBarrierBar(
                 state = state,
                 modifier = Modifier
@@ -182,7 +182,7 @@ fun ConveyorMissionScreen(
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             )
 
-            // 4. СЕТКА 20 СТРОИТЕЛЕЙ (СХЛОПЫВАНИЕ ПРИ ЗЕЛЕНОМ СВЕТЕ)
+            // 4. Сетка строителей роя
             AnimatedVisibility(
                 visible = !state.mission.isGreenLightOn,
                 enter = expandVertically(spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(),
@@ -229,7 +229,7 @@ fun ConveyorMissionScreen(
                 }
             }
 
-            // 5. ПОСТ-БАРЬЕРНАЯ КОНСОЛЬ ВЕРИФИКАЦИИ (ОТКРЫВАЕТСЯ ПОСЛЕ СХЛОПЫВАНИЯ)
+            // 5. Консоль после барьера
             AnimatedVisibility(
                 visible = state.mission.isGreenLightOn,
                 enter = expandVertically(tween(700)) + fadeIn(tween(500)),
@@ -244,7 +244,7 @@ fun ConveyorMissionScreen(
             }
         }
 
-        // 6. НИЖНЯЯ КАПСУЛА УПРАВЛЕНИЯ И ВВОДА
+        // 6. Нижняя капсула управления
         MissionControlCapsule(
             state = state,
             onRepoChanged = { viewModel.onRepoInputChanged(it) },
@@ -264,7 +264,7 @@ fun ConveyorMissionScreen(
                 .padding(horizontal = 14.dp, vertical = 8.dp)
         )
 
-        // 7. ДИАЛОГ ХРАНИЛИЩА KNOX VAULT
+        // 7. Диалог Knox Vault
         if (state.isSettingsDialogOpen) {
             KnoxVaultSettingsDialog(
                 currentGeminiKey = state.geminiApiKeyMasked,
@@ -273,11 +273,20 @@ fun ConveyorMissionScreen(
                 onDismiss = { viewModel.onCloseSettingsDialog() }
             )
         }
+
+        // 8. Всплывающее окно полного отчета
+        if (showReportDialog) {
+            MissionReportDialog(
+                title = if (state.mission.currentPhase == OrchestratorPhase.COMPLETED) "ОТЧЕТ ОРКЕСТРАТОРА (УСПЕХ)" else "ОТЧЕТ МИССИИ",
+                content = state.mission.statusMessage.ifBlank { "Отчет отсутствует." },
+                onDismiss = { showReportDialog = false }
+            )
+        }
     }
 }
 
 // ====================================================================
-// Зона 1: Системный Хедер Миссии
+// Зона 1: Системный Хедер
 // ====================================================================
 
 @Composable
@@ -345,27 +354,30 @@ private fun MissionHeaderBar(
                 }
             }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = Color(0xFF0F172A),
-                    border = BorderStroke(1.dp, Color(0xFF1E293B)),
-                    modifier = Modifier.clickable { onOpenSettings() }
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0xFF0F172A),
+                border = BorderStroke(1.dp, Color(0xFF1E293B)),
+                modifier = Modifier.clickable { onOpenSettings() }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.Lock, contentDescription = "Knox Vault", tint = if (state.hasValidGeminiKey && state.hasValidGitHubPat) NeonGreen else NeonAmber, modifier = Modifier.size(13.dp))
-                        Spacer(modifier = Modifier.width(5.dp))
-                        Text(
-                            text = "KNOX",
-                            color = if (state.hasValidGeminiKey && state.hasValidGitHubPat) NeonGreen else NeonAmber,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            style = MonospaceTypography
-                        )
-                    }
+                    Icon(
+                        Icons.Default.Lock,
+                        contentDescription = "Knox Vault",
+                        tint = if (state.hasValidGeminiKey && state.hasValidGitHubPat) NeonGreen else NeonAmber,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = "KNOX",
+                        color = if (state.hasValidGeminiKey && state.hasValidGitHubPat) NeonGreen else NeonAmber,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        style = MonospaceTypography
+                    )
                 }
             }
         }
@@ -373,12 +385,13 @@ private fun MissionHeaderBar(
 }
 
 // ====================================================================
-// Зона 2: Верхний Монолитный Квадрат (Оркестратор Gemini 3.8 Flash)
+// Зона 2: Монолитный Квадрат (Оркестратор Gemini 3.8 Flash)
 // ====================================================================
 
 @Composable
 private fun OrchestratorMonolithCard(
     state: ConveyorScreenUiState,
+    onOpenReport: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "ThinkingPulse")
@@ -409,7 +422,6 @@ private fun OrchestratorMonolithCard(
         colors = CardDefaults.cardColors(containerColor = MonolithBlack)
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            // Верхняя плашка статуса Оркестратора
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -449,7 +461,7 @@ private fun OrchestratorMonolithCard(
 
                     Text(
                         text = "[ШАГ ${state.mission.currentStep}/${state.mission.maxSteps}]",
-                        color = TextMuted,
+                        color = if (state.mission.currentStep > 0) NeonCyan else TextMuted,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         style = MonospaceTypography
@@ -459,7 +471,7 @@ private fun OrchestratorMonolithCard(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Текстовая область живых рассуждений (High Thinking)
+            // Текстовая область рассуждений
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -477,7 +489,7 @@ private fun OrchestratorMonolithCard(
                     Text(
                         text = state.mission.liveOrchestratorThought.ifBlank {
                             if (state.mission.isRunning) "Инициализация рассуждений и построение плана миссии..."
-                            else "Оркестратор находится в режиме ожидания. Введите задачу и нажмите Старт."
+                            else "Оркестратор находится в режиме ожидания. Введите задачу и нажмите Пуск."
                         },
                         color = if (isThinking) Color(0xFFE2E8F0) else TextMuted,
                         fontSize = 12.sp,
@@ -488,23 +500,53 @@ private fun OrchestratorMonolithCard(
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // Нижняя строка состояния: коммит, фаза, CI
+            // КЛИКАБЕЛЬНАЯ СТРОКА СТАТУСА И ОТЧЕТА
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable { onOpenReport() }
+                    .padding(vertical = 2.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = state.mission.statusMessage,
-                    color = if (state.mission.currentPhase == OrchestratorPhase.FAILED) NeonRed else TextSecondary,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MonospaceTypography,
-                    modifier = Modifier.weight(1f, fill = false)
-                )
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = state.mission.statusMessage,
+                        color = when (state.mission.currentPhase) {
+                            OrchestratorPhase.FAILED -> NeonRed
+                            OrchestratorPhase.COMPLETED -> NeonGreen
+                            else -> TextSecondary
+                        },
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MonospaceTypography,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = if (state.mission.currentPhase == OrchestratorPhase.COMPLETED) Color(0xFF0F2E1E) else Color(0xFF1A1E24),
+                        border = BorderStroke(0.5.dp, if (state.mission.currentPhase == OrchestratorPhase.COMPLETED) NeonGreen else BorderDim)
+                    ) {
+                        Text(
+                            text = "ОТЧЕТ ↗",
+                            color = if (state.mission.currentPhase == OrchestratorPhase.COMPLETED) NeonGreen else NeonCyan,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            style = MonospaceTypography,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                    }
+                }
 
                 if (state.mission.lastCommitSha != null) {
                     Spacer(modifier = Modifier.width(8.dp))
@@ -522,7 +564,7 @@ private fun OrchestratorMonolithCard(
 }
 
 // ====================================================================
-// Зона 3: Рандеву-Бар с Главной Зеленой Лампой (Dynamic Barrier)
+// Зона 3: Рандеву-Бар
 // ====================================================================
 
 @Composable
@@ -553,7 +595,6 @@ private fun RendezvousBarrierBar(
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Главная Неоновая Лампа (Canvas)
             Box(
                 modifier = Modifier
                     .size(28.dp)
@@ -572,7 +613,7 @@ private fun RendezvousBarrierBar(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = if (isGreen) "🟢 ВСЕ 20 БИЛДЕРОВ СДАЛИ ОТЧЕТЫ" else "ДИНАМИЧЕСКИЙ БАРЬЕР СИНХРОНИЗАЦИИ",
+                        text = if (isGreen) "🟢 ВСЕ БИЛДЕРЫ СДАЛИ ОТЧЕТЫ" else "ДИНАМИЧЕСКИЙ БАРЬЕР СИНХРОНИЗАЦИИ",
                         color = if (isGreen) NeonGreen else TextPrimary,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
@@ -590,7 +631,6 @@ private fun RendezvousBarrierBar(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Шкала обратного отсчета барьера
                 LinearProgressIndicator(
                     progress = { animatedProgress },
                     modifier = Modifier
@@ -606,7 +646,7 @@ private fun RendezvousBarrierBar(
 }
 
 // ====================================================================
-// Зона 4: Карточка Строителя (Свернутая и Развернутая Аккордеон)
+// Зона 4: Карточка Строителя
 // ====================================================================
 
 @Composable
@@ -630,7 +670,6 @@ private fun BuilderCardItem(
         colors = CardDefaults.cardColors(containerColor = cardBg)
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
-            // Верхняя плашка карточки билдера
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -677,7 +716,6 @@ private fun BuilderCardItem(
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            // Целевой файл билдера
             Text(
                 text = card.targetFile.substringAfterLast('/'),
                 color = TextSecondary,
@@ -688,7 +726,6 @@ private fun BuilderCardItem(
                 style = MonospaceTypography
             )
 
-            // РАСКРЫВАЮЩИЙСЯ АККОРДЕОН ПО ТАПУ
             if (isExpanded) {
                 Spacer(modifier = Modifier.height(10.dp))
                 HorizontalDivider(color = BorderDim, thickness = 0.5.dp)
@@ -728,7 +765,6 @@ private fun BuilderCardItem(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Кнопка сворачивания карточки
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End
@@ -761,7 +797,7 @@ private fun BuilderCardItem(
 }
 
 // ====================================================================
-// Зона 5: Пост-Барьерная Консоль Верификации (После Схлопывания)
+// Зона 5: Пост-Барьерная Консоль
 // ====================================================================
 
 @Composable
@@ -807,7 +843,7 @@ private fun PostBarrierVerificationConsole(
             Spacer(modifier = Modifier.height(10.dp))
 
             Text(
-                text = "Все 20 строителей завершили сборку без конфликтов. " +
+                text = "Все строители завершили сборку без конфликтов. " +
                        "Локальная файловая система UFS 4.0 зафиксирована. Единый атомарный коммит направлен в ветку ${state.mission.targetBranch}.",
                 color = TextSecondary,
                 fontSize = 11.sp,
@@ -837,7 +873,7 @@ private fun PostBarrierVerificationConsole(
 }
 
 // ====================================================================
-// Зона 6: Нижняя Капсула Управления и Горячие Клавиши DeX
+// Зона 6: Нижняя Капсула Управления
 // ====================================================================
 
 @Composable
@@ -861,7 +897,6 @@ private fun MissionControlCapsule(
         modifier = modifier
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
-            // Строка конфигурации репозитория (показывается только когда миссия не запущена)
             if (!isRunning) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -916,7 +951,6 @@ private fun MissionControlCapsule(
                 Spacer(modifier = Modifier.height(6.dp))
             }
 
-            // Основная строка ввода задачи
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -948,7 +982,6 @@ private fun MissionControlCapsule(
                         modifier = Modifier
                             .fillMaxWidth()
                             .onPreviewKeyEvent { event ->
-                                // Поддержка Samsung DeX и физических клавиатур: Ctrl + Enter
                                 if (event.type == KeyEventType.KeyDown) {
                                     if (event.key == Key.Escape) {
                                         onCollapseCard()
@@ -964,7 +997,6 @@ private fun MissionControlCapsule(
 
                 Spacer(modifier = Modifier.width(8.dp))
 
-                // Кнопка СТАРТ / СТОП
                 if (isRunning) {
                     Button(
                         onClick = onCancel,
@@ -994,7 +1026,7 @@ private fun MissionControlCapsule(
 }
 
 // ====================================================================
-// Графика Canvas: Аппаратные Светодиоды (Zero-LayoutNode)
+// Графика Canvas: Аппаратные Светодиоды
 // ====================================================================
 
 @Composable
@@ -1017,7 +1049,6 @@ private fun CanvasLedIndicator(
         val radius = size.minDimension / 2f
         val centerOffset = Offset(size.width / 2f, size.height / 2f)
 
-        // Внешний фотонный ореол рассеивания
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(color.copy(alpha = 0.6f * currentAlpha), color.copy(alpha = 0f)),
@@ -1028,7 +1059,6 @@ private fun CanvasLedIndicator(
             center = centerOffset
         )
 
-        // Внутреннее физическое ядро кристалла
         drawCircle(
             color = color.copy(alpha = currentAlpha),
             radius = radius * 0.45f,
@@ -1055,7 +1085,6 @@ private fun CanvasMainGreenLamp(isIgnited: Boolean) {
         val centerOffset = Offset(size.width / 2f, size.height / 2f)
 
         if (isIgnited) {
-            // Мощный радиальный ореол
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(NeonGreen.copy(alpha = 0.8f * alpha), NeonGreen.copy(alpha = 0f)),
@@ -1067,7 +1096,6 @@ private fun CanvasMainGreenLamp(isIgnited: Boolean) {
             )
         }
 
-        // Ядро лампы
         drawCircle(
             color = baseColor.copy(alpha = if (isIgnited) 1f else 0.5f),
             radius = radius * 0.45f,
@@ -1077,8 +1105,86 @@ private fun CanvasMainGreenLamp(isIgnited: Boolean) {
 }
 
 // ====================================================================
-// Вспомогательные Элементы (Placeholder & Knox Dialog)
+// Вспомогательные Диалоги (Отчет, Placeholder, Knox, Ошибки)
 // ====================================================================
+
+@Composable
+private fun MissionReportDialog(
+    title: String,
+    content: String,
+    onDismiss: () -> Unit
+) {
+    val clipboardManager = LocalClipboardManager.current
+    val haptic = LocalHapticFeedback.current
+    val context = LocalContext.current
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF101216),
+        shape = RoundedCornerShape(16.dp),
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = title,
+                    color = NeonGreen,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    style = MonospaceTypography
+                )
+                IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = TextMuted, modifier = Modifier.size(18.dp))
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 150.dp, max = 460.dp)
+                    .background(Color(0xFF07080A), RoundedCornerShape(10.dp))
+                    .border(1.dp, BorderDim, RoundedCornerShape(10.dp))
+                    .padding(12.dp)
+            ) {
+                val scrollState = rememberScrollState()
+                SelectionContainer(modifier = Modifier.verticalScroll(scrollState)) {
+                    StreamingMarkdownContent(
+                        text = content,
+                        onOpenUrl = { /* URL открываются при необходимости */ }
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        clipboardManager.setText(AnnotatedString(content))
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        Toast.makeText(context, "Отчет скопирован в буфер", Toast.LENGTH_SHORT).show()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Icon(Icons.Default.Share, contentDescription = "Копировать", tint = NeonCyan, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("КОПИРОВАТЬ", color = NeonCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
+                }
+
+                Button(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("ЗАКРЫТЬ", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
+                }
+            }
+        }
+    )
+}
 
 @Composable
 private fun EmptySwarmPlaceholder(isRunning: Boolean) {
