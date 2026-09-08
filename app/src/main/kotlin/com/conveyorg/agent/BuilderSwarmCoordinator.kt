@@ -259,7 +259,29 @@ class BuilderSwarmCoordinator(
         referenceCode: String? = null
     ): String = registrationMutex.withLock {
         val currentState = _state.value
-        check(!currentState.isSealed) { "Барьер уже запечатан. Регистрация новых задач запрещена." }
+
+        // Многоволновой режим: если предыдущая волна завершилась, открываем новую
+        if (currentState.isGreenLightOn) {
+            _state.update {
+                it.copy(
+                    isSealed = false,
+                    isGreenLightOn = false,
+                    expectedBarrier = 0,
+                    remainingBarrier = 0
+                )
+            }
+            barrierDeferred = CompletableDeferred()
+        } else if (currentState.isSealed) {
+            // Динамическое расширение барьера при добавлении задач на лету
+            atomicRemainingBarrier.incrementAndGet()
+            _state.update {
+                it.copy(
+                    expectedBarrier = it.expectedBarrier + 1,
+                    remainingBarrier = it.remainingBarrier + 1
+                )
+            }
+        }
+
         check(currentState.primaryCountA < MAX_PRIMARY_BUILDERS_A) {
             "Превышен лимит основных билдеров A (Максимум: $MAX_PRIMARY_BUILDERS_A)."
         }
@@ -305,7 +327,27 @@ class BuilderSwarmCoordinator(
         instruction: String
     ): String = registrationMutex.withLock {
         val currentState = _state.value
-        check(!currentState.isSealed) { "Барьер уже запечатан. Регистрация новых задач запрещена." }
+
+        if (currentState.isGreenLightOn) {
+            _state.update {
+                it.copy(
+                    isSealed = false,
+                    isGreenLightOn = false,
+                    expectedBarrier = 0,
+                    remainingBarrier = 0
+                )
+            }
+            barrierDeferred = CompletableDeferred()
+        } else if (currentState.isSealed) {
+            atomicRemainingBarrier.incrementAndGet()
+            _state.update {
+                it.copy(
+                    expectedBarrier = it.expectedBarrier + 1,
+                    remainingBarrier = it.remainingBarrier + 1
+                )
+            }
+        }
+
         check(currentState.crossCountB < MAX_CROSS_BUILDERS_B) {
             "Превышен лимит сквозных билдеров B (Максимум: $MAX_CROSS_BUILDERS_B)."
         }
