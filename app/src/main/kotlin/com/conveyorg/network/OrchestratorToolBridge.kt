@@ -90,7 +90,8 @@ class OrchestratorToolBridge(
 ) : OrchestratorBridge {
 
     companion object {
-        private const val TOOL_EXECUTION_TIMEOUT_MS = 90_000L
+        // Увеличен таймаут до 6 минут для безопасного ожидания компиляции Android в Actions
+        private const val TOOL_EXECUTION_TIMEOUT_MS = 360_000L
         private const val MAX_OUTPUT_CHARS = 40_000
 
         @OptIn(ExperimentalSerializationApi::class)
@@ -195,7 +196,7 @@ class OrchestratorToolBridge(
                 ),
                 FunctionDeclarationDto(
                     name = "github_get_ci_status",
-                    description = "Опрашивает текущий статус выполнения сборщика Actions по ID запуска (status: queued, in_progress, completed; conclusion: success, failure).",
+                    description = "Опрашивает статус сборщика Actions. Инструмент автоматически ожидает в фоне завершения компиляции (success/failure) и возвращает итоговый вердикт за 1 шаг.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
                             "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец репозитория."),
@@ -436,15 +437,21 @@ class OrchestratorToolBridge(
                 val repo = args.getRequiredString("repo")
                 val runId = args.getRequiredLong("run_id")
 
-                val rawRunJson = gitHubEngine.executeRawRest("GET", "repos/$owner/$repo/actions/runs/$runId")
-                val runObj = json.parseToJsonElement(rawRunJson).jsonObject
+                // ИНТЕЛЛЕКТУАЛЬНЫЙ ПОЛЛИНГ В КОТЛИНЕ (0 токенов): ждем реального завершения сборки
+                val finishedRun = gitHubEngine.pollWorkflowRunConclusion(
+                    owner = owner,
+                    repo = repo,
+                    runId = runId,
+                    pollIntervalMs = 5000L,
+                    timeoutMs = 300_000L
+                )
 
                 buildJsonObject {
                     put("status", "success")
                     put("run_id", runId)
-                    put("run_status", runObj["status"]?.jsonPrimitive?.content ?: "unknown")
-                    put("conclusion", runObj["conclusion"]?.jsonPrimitive?.content ?: "pending")
-                    put("html_url", runObj["html_url"]?.jsonPrimitive?.content ?: "")
+                    put("run_status", finishedRun.status)
+                    put("conclusion", finishedRun.conclusion ?: "pending")
+                    put("html_url", finishedRun.htmlUrl)
                 }
             }
 
