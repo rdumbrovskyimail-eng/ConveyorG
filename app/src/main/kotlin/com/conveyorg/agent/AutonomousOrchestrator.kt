@@ -27,6 +27,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 import java.io.Closeable
+import java.io.File
 import java.io.IOException
 import java.util.UUID
 import kotlin.math.min
@@ -309,10 +310,10 @@ class AutonomousOrchestrator(
                             _state.update {
                                 it.copy(
                                     phase = OrchestratorPhase.DUAL_LOOP_VERIFYING,
-                                    statusMessage = "Двухконтурная верификация: ожидание сборки в GitHub Actions..."
+                                    statusMessage = "Двухконтурная верификация компилятора..."
                                 )
                             }
-                            _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.DUAL_LOOP_VERIFYING, "Верификация сборки в Actions"))
+                            _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.DUAL_LOOP_VERIFYING, "Верификация сборки"))
 
                             val verified = executeDualLoopVerification(
                                 owner = owner,
@@ -356,8 +357,9 @@ class AutonomousOrchestrator(
 
                     val firstCall = functionCalls.first()
                     nextThinkingLevel = when (firstCall.name) {
-                        "workspace_get_tree", "workspace_read_file", "workspace_search_symbol" -> "LOW"
-                        "swarm_dispatch_cross_builder", "swarm_seal_barrier" -> "LOW"
+                        "workspace_get_tree", "workspace_read_file", "workspace_write_file",
+                        "workspace_batch_write", "workspace_delete_file", "workspace_search_symbol",
+                        "workspace_read_diff", "swarm_dispatch_cross_builder", "swarm_seal_barrier" -> "LOW"
                         else -> "HIGH"
                     }
 
@@ -382,7 +384,7 @@ class AutonomousOrchestrator(
                             conversationHistory.add(
                                 AgentContentDto(
                                     role = "user",
-                                    parts = listOf(AgentPartDto(text = "ВНИМАНИЕ: Вы вызываете '${call.name}' с одинаковыми параметрами уже 3 раза подряд. Прекратите повторное чтение и переходите к модификации кода через билдеры или завершите задачу."))
+                                    parts = listOf(AgentPartDto(text = "ВНИМАНИЕ: Вы вызываете '${call.name}' с одинаковыми параметрами 3 раза подряд. Прекратите повторные вызовы и переходите к следующему шагу."))
                                 )
                             )
                         }
@@ -510,9 +512,11 @@ class AutonomousOrchestrator(
         val apiKey = geminiApiKeyProvider().trim()
         val endpoint = "$GEMINI_BASE_URL/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
 
+        val sanitizedHistory = sanitizeHistoryForWire(history)
+
         val requestPayload = AgentWireRequest(
             systemInstruction = AgentSystemInstructionDto(listOf(AgentPartDto(text = systemPrompt))),
-            contents = history,
+            contents = sanitizedHistory,
             tools = listOf(toolDeclarations),
             generationConfig = AgentGenerationConfigDto(
                 maxOutputTokens = 65536,
@@ -609,6 +613,31 @@ class AutonomousOrchestrator(
         AgentContentDto(role = "model", parts = responseParts)
     }
 
+    private fun sanitizeHistoryForWire(history: List<AgentContentDto>): List<AgentContentDto> {
+        return history.mapIndexed { index, turn ->
+            if (turn.role != "model") {
+                turn
+            } else {
+                val cleanedParts = turn.parts.mapNotNull { part ->
+                    if (part.thought == true) {
+                        null
+                    } else {
+                        part
+                    }
+                }
+
+                if (cleanedParts.isEmpty()) {
+                    AgentContentDto(
+                        role = "model",
+                        parts = listOf(AgentPartDto(text = "[Шаг рассуждений зафиксирован]"))
+                    )
+                } else {
+                    AgentContentDto(role = "model", parts = cleanedParts)
+                }
+            }
+        }
+    }
+
     private suspend fun executeDualLoopVerification(
         owner: String,
         repo: String,
@@ -618,8 +647,24 @@ class AutonomousOrchestrator(
         workspaceManager: LocalWorkspaceManager,
         onRepairNeeded: suspend (String) -> Boolean
     ): Boolean {
+        val workflowDir = File(workspaceManager.workspaceRoot, ".github/workflows")
+        val hasWorkflows = workflowDir.exists() && workflowDir.walkTopDown().any {
+            it.isFile && (it.extension.equals("yml", ignoreCase = true) || it.extension.equals("yaml", ignoreCase = true))
+        }
+
+        if (!hasWorkflows) {
+            AppLogger.i(AppLogger.TAG_APP, "DualLoop: В каталоге .github/workflows нет воркфлоу. CI верификация пропущена (локальный коммит валиден).")
+            return true
+        }
+
         delay(4000)
-        val runs = gitHubEngine.getWorkflowRuns(owner, repo, branch)
+        val runs = try {
+            gitHubEngine.getWorkflowRuns(owner, repo, branch)
+        } catch (e: Exception) {
+            AppLogger.w(AppLogger.TAG_APP, "DualLoop: Ошибка запроса списка запусков Actions: ${e.message}")
+            emptyList()
+        }
+
         val targetRun = runs.firstOrNull { it.headSha == commitSha } ?: runs.firstOrNull()
 
         if (targetRun == null) {
@@ -664,7 +709,7 @@ class AutonomousOrchestrator(
                                "ИНСТРУКЦИЯ ПО РЕМОНТУ:\n" +
                                "1. Изучи указанные файлы и номера строк.\n" +
                                "2. Прочитай поврежденные файлы через 'workspace_read_file'.\n" +
-                               "3. Отремонтируй их через билдеры роя или прямой пуш исправлений.\n" +
+                               "3. Отремонтируй их через 'workspace_write_file' или билдеры роя.\n" +
                                "4. Отправь исправленный атомарный коммит через 'github_push_atomic_commit'."
                     )
                 )
@@ -680,19 +725,20 @@ class AutonomousOrchestrator(
     }
 
     private fun compactConversationHistory(history: MutableList<AgentContentDto>) {
-        if (history.size <= 16) return
+        if (history.size <= 6) return
 
-        for (i in 1 until history.size - 6) {
+        val keepRecentIndex = (history.size - 4).coerceAtLeast(1)
+        for (i in 1 until keepRecentIndex) {
             val turn = history[i]
             if (turn.role == "tool") {
                 val compactedParts = turn.parts.map { part ->
                     val resp = part.functionResponse ?: return@map part
-                    if (resp.name == "workspace_read_file" || resp.name == "workspace_read_diff") {
+                    if (resp.name in setOf("workspace_read_file", "workspace_read_diff", "workspace_get_tree", "workspace_search_symbol")) {
                         part.copy(
                             functionResponse = resp.copy(
                                 response = buildJsonObject {
                                     put("status", "compacted")
-                                    put("notice", "[Содержимое файла было прочитано и обработано агентом на шаге $i].")
+                                    put("notice", "[Результат вызова '${resp.name}' на шаге $i компактно сохранен в контексте].")
                                 }
                             )
                         )
@@ -721,14 +767,24 @@ class AutonomousOrchestrator(
     private fun buildSystemInstruction(owner: String, repo: String, branch: String): String {
         return "Ты — верховный автономный инженер-оркестратор ClientG на базе Gemini 3.8 Flash.\n" +
                "Твоя задача — автономно реализовать программную задачу в репозитории '$owner/$repo' (ветка: '$branch').\n\n" +
-               "ПРАВИЛА И СТАНДАРТЫ РАБОТЫ:\n" +
-               "1. Репозиторий распакован локально на устройстве Android. Все файлы доступны мгновенно.\n" +
-               "2. Если задача чисто исследовательская или проверочная (не требует изменения кода) — изучи файлы через 'workspace_get_tree' и сразу дай понятный финальный ответ без коммита.\n" +
-               "3. Если задача требует разработки — используй рой билдеров: 'swarm_dispatch_primary_builder' (Класс A), 'swarm_dispatch_cross_builder' (Класс B), 'swarm_seal_barrier' и 'swarm_get_reports_manifest'.\n" +
-               "4. Любые правки проверяй через 'workspace_read_diff' (Myers Unified Diff).\n" +
-               "5. Когда логика идеальна, отправь единый коммит через 'github_push_atomic_commit'.\n" +
-               "6. После коммита проверь компиляцию через 'github_trigger_ci_build' и 'github_get_ci_status'.\n" +
-               "7. Не вызывай один и тот же инструмент повторно, если результат уже получен."
+               "РЕЖИМЫ РАБОТЫ И СТАНДАРТЫ:\n" +
+               "1. РЕЖИМ ПРЯМОГО ДЕЙСТВИЯ (DIRECT MODE):\n" +
+               "   - Для создания служебных файлов, конфигов (.gitignore, .gitattributes, gradle.properties, settings.gradle.kts), мелких скриптов, единичных классов или правок багов (до 3 файлов) — используй инструмент 'workspace_write_file' или 'workspace_batch_write' НАПРЯМУЮ. Делай это быстро, за 1-2 шага, без созыва роя!\n" +
+               "2. РЕЖИМ ПАРАЛЛЕЛЬНОГО РОЯ (SWARM MODE):\n" +
+               "   - Для масштабной кодогенерации и разработки архитектурных модулей (доменные модели, шахматная доска, правила ходов, генератор ходов, шахматный AI движок, контроллер таймера, Compose UI) — ОБЯЗАТЕЛЬНО задействуй параллельный рой строителей 3.5 Lite:\n" +
+               "     * 'swarm_dispatch_primary_builder' (Класс A для независимых интерфейсов и базовых классов)\n" +
+               "     * 'swarm_dispatch_cross_builder' (Класс B с указанием dependency_task_id по закону A -> B)\n" +
+               "     * 'swarm_seal_barrier' (запечатывание барьера на количество задач N)\n" +
+               "     * 'swarm_get_reports_manifest' (получение манифеста после Зеленой Лампочки).\n" +
+               "3. ДИФФ-КОНТРОЛЬ:\n" +
+               "   - Перед отправкой коммита вызови 'workspace_read_diff' для проверки корректности изменений.\n" +
+               "4. АТОМАРНЫЙ КОММИТ:\n" +
+               "   - Отправляй все изменения ЕДИНЫМ атомарным коммитом через 'github_push_atomic_commit'.\n" +
+               "5. CI-ВЕРИФИКАЦИЯ:\n" +
+               "   - Вызывай 'github_trigger_ci_build' и 'github_get_ci_status' ТОЛЬКО если в проекте уже существует настроенный воркфлоу в .github/workflows/*.yml. Если репозиторий пуст или CI еще не создан — НЕ вызывай CI-инструменты!\n" +
+               "6. ЭКОНОМИЯ ТОКЕНОВ И ШАГОВ:\n" +
+               "   - Не вызывай повторно инструменты с одинаковыми параметрами.\n" +
+               "   - Действуй максимально решительно и лаконично."
     }
 
     private fun buildInitialUserPrompt(objective: String, totalFiles: Int): String {
