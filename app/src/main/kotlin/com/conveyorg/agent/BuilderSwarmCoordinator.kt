@@ -2,10 +2,7 @@ package com.conveyorg.agent
 
 import android.content.Context
 import com.conveyorg.data.LocalWorkspaceManager
-import com.conveyorg.network.FunctionDeclarationDto
-import com.conveyorg.network.FunctionParametersSchemaDto
-import com.conveyorg.network.GeminiToolDto
-import com.conveyorg.network.ParameterPropertyDto
+import com.conveyorg.network.*
 import com.conveyorg.util.AppLogger
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*
@@ -173,8 +170,7 @@ internal data class LiteGenerationConfigDto(
 @Serializable
 internal data class LiteUnaryResponse(
     val candidates: List<LiteCandidateDto>? = null,
-    val usageMetadata: LiteUsageMetadataDto? = null,
-    val error: GoogleApiErrorDto? = null
+    val usageMetadata: LiteUsageMetadataDto? = null
 )
 
 @Serializable
@@ -485,11 +481,9 @@ class BuilderSwarmCoordinator(
             val functionCall = functionCallPart?.functionCall
 
             if (functionCall != null) {
-                // Извлекаем сигнатуру мыслей (thought_signature) модели
                 val signature = functionCallPart.resolveThoughtSignature()
                     ?: candidateContent.parts.firstOrNull { it.resolveThoughtSignature() != null }?.resolveThoughtSignature()
 
-                // Сохраняем ход модели с сохранением подписи thought_signature
                 val preservedModelParts = candidateContent.parts.map { part ->
                     if (part.functionCall != null) {
                         part.copy(
