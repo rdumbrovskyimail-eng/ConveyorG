@@ -90,7 +90,6 @@ class OrchestratorToolBridge(
 ) : OrchestratorBridge {
 
     companion object {
-        // Увеличен таймаут до 6 минут для безопасного ожидания компиляции Android в Actions
         private const val TOOL_EXECUTION_TIMEOUT_MS = 360_000L
         private const val MAX_OUTPUT_CHARS = 40_000
 
@@ -108,7 +107,7 @@ class OrchestratorToolBridge(
             functionDeclarations = listOf(
                 FunctionDeclarationDto(
                     name = "workspace_get_tree",
-                    description = "Возвращает структуру дерева локального репозитория. Используйте для понимания структуры папок и пакетов перед работой.",
+                    description = "Возвращает структуру дерева локального репозитория. Используйте для понимания структуры папок и пакетов перед началом работы.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
                             "max_depth" to ParameterPropertyDto(
@@ -120,7 +119,7 @@ class OrchestratorToolBridge(
                 ),
                 FunctionDeclarationDto(
                     name = "workspace_read_file",
-                    description = "Читает содержимое локального файла из рабочей области. Поддерживает постраничное построчное чтение для экономии токенов.",
+                    description = "Читает содержимое локального файла из рабочей области. Поддерживает постраничное чтение для экономии токенов.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
                             "path" to ParameterPropertyDto(
@@ -134,6 +133,54 @@ class OrchestratorToolBridge(
                             "end_line" to ParameterPropertyDto(
                                 type = "INTEGER",
                                 description = "Конечный номер строки для чтения (включительно, опционально)."
+                            )
+                        ),
+                        required = listOf("path")
+                    )
+                ),
+                FunctionDeclarationDto(
+                    name = "workspace_write_file",
+                    description = "Атомарно создает или перезаписывает локальный текстовый файл в песочнице. Используйте для прямой записи служебных файлов (.gitignore, .gitattributes, gradle.properties), скриптов или отдельных классов без запуска роя.",
+                    parameters = FunctionParametersSchemaDto(
+                        properties = mapOf(
+                            "path" to ParameterPropertyDto(
+                                type = "STRING",
+                                description = "Относительный путь к файлу (например, .gitignore или build.gradle.kts)."
+                            ),
+                            "content" to ParameterPropertyDto(
+                                type = "STRING",
+                                description = "Полный исходный текст файла без Markdown-оберток."
+                            ),
+                            "is_executable" to ParameterPropertyDto(
+                                type = "BOOLEAN",
+                                description = "Установить ли права на исполнение chmod +x (true для gradlew и .sh файлов)."
+                            )
+                        ),
+                        required = listOf("path", "content")
+                    )
+                ),
+                FunctionDeclarationDto(
+                    name = "workspace_batch_write",
+                    description = "Атомарно записывает группу файлов за один шаг. Идеально для одновременного создания .gitignore, .gitattributes и сборочных скриптов за один вызов.",
+                    parameters = FunctionParametersSchemaDto(
+                        properties = mapOf(
+                            "files" to ParameterPropertyDto(
+                                type = "OBJECT",
+                                description = "Словарь вида { 'путь_к_файлу': 'содержимое_файла' }.",
+                                properties = emptyMap()
+                            )
+                        ),
+                        required = listOf("files")
+                    )
+                ),
+                FunctionDeclarationDto(
+                    name = "workspace_delete_file",
+                    description = "Удаляет локальный файл из рабочей области репозитория.",
+                    parameters = FunctionParametersSchemaDto(
+                        properties = mapOf(
+                            "path" to ParameterPropertyDto(
+                                type = "STRING",
+                                description = "Относительный путь к удаляемому файлу."
                             )
                         ),
                         required = listOf("path")
@@ -183,7 +230,7 @@ class OrchestratorToolBridge(
                 ),
                 FunctionDeclarationDto(
                     name = "github_trigger_ci_build",
-                    description = "Принудительно запускает сборку проекта (Workflow Dispatch) в GitHub Actions для аппаратной верификации компилятором.",
+                    description = "Запускает сборку проекта (Workflow Dispatch) в GitHub Actions. Вызывайте ТОЛЬКО если в репозитории есть настроенный воркфлоу в .github/workflows/.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
                             "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец репозитория."),
@@ -196,7 +243,7 @@ class OrchestratorToolBridge(
                 ),
                 FunctionDeclarationDto(
                     name = "github_get_ci_status",
-                    description = "Опрашивает статус сборщика Actions. Инструмент автоматически ожидает в фоне завершения компиляции (success/failure) и возвращает итоговый вердикт за 1 шаг.",
+                    description = "Опрашивает статус сборщика Actions. Инструмент ожидает в фоне завершения сборки и возвращает итоговый вердикт. Не вызывайте, если CI не запущен.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
                             "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец репозитория."),
@@ -253,7 +300,7 @@ class OrchestratorToolBridge(
                 ),
                 FunctionDeclarationDto(
                     name = "github_execute_raw_rest",
-                    description = "Универсальный шлюз: выполняет произвольный запрос к абсолютно любому эндпоинту GitHub REST API (100% покрытие любых редких методов).",
+                    description = "Универсальный шлюз: выполняет произвольный запрос к любому эндпоинту GitHub REST API.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
                             "method" to ParameterPropertyDto(type = "STRING", description = "HTTP-метод (GET, POST, PUT, PATCH, DELETE).", enum = listOf("GET", "POST", "PUT", "PATCH", "DELETE")),
@@ -351,6 +398,63 @@ class OrchestratorToolBridge(
                 }
             }
 
+            "workspace_write_file" -> {
+                val path = args.getRequiredString("path")
+                val content = args.getRequiredString("content")
+                val isExecutable = args["is_executable"]?.jsonPrimitive?.booleanOrNull
+
+                val cleanContent = content.trim()
+                    .replace(Regex("^```[a-zA-Z0-9_-]*\\r?\\n"), "")
+                    .replace(Regex("\\r?\\n```$"), "")
+
+                val writtenFile = workspaceManager.writeTextFileAtomic(
+                    relativePath = path,
+                    content = cleanContent,
+                    isExecutable = isExecutable
+                )
+
+                buildJsonObject {
+                    put("status", "success")
+                    put("path", path)
+                    put("bytes_written", writtenFile.length())
+                    put("message", "Файл '$path' успешно записан на диск.")
+                }
+            }
+
+            "workspace_batch_write" -> {
+                val filesObj = args["files"]?.jsonObject
+                    ?: throw IllegalArgumentException("Обязательный параметр 'files' отсутствует или не является JSON-объектом.")
+
+                val writtenPaths = mutableListOf<String>()
+                filesObj.forEach { (path, contentElem) ->
+                    val content = contentElem.jsonPrimitive.content
+                    val cleanContent = content.trim()
+                        .replace(Regex("^```[a-zA-Z0-9_-]*\\r?\\n"), "")
+                        .replace(Regex("\\r?\\n```$"), "")
+                    workspaceManager.writeTextFileAtomic(path, cleanContent)
+                    writtenPaths.add(path)
+                }
+
+                buildJsonObject {
+                    put("status", "success")
+                    put("files_written_count", writtenPaths.size)
+                    putJsonArray("written_paths") {
+                        writtenPaths.forEach { add(JsonPrimitive(it)) }
+                    }
+                    put("message", "Пакет из ${writtenPaths.size} файлов успешно записан на диск за один шаг.")
+                }
+            }
+
+            "workspace_delete_file" -> {
+                val path = args.getRequiredString("path")
+                val deleted = workspaceManager.deleteFile(path)
+                buildJsonObject {
+                    put("status", if (deleted) "success" else "not_found")
+                    put("path", path)
+                    put("message", if (deleted) "Файл удален" else "Файл не существовал в рабочей области")
+                }
+            }
+
             "workspace_search_symbol" -> {
                 val query = args.getRequiredString("query")
                 val exts = args["file_extensions"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }?.toSet() ?: emptySet()
@@ -437,7 +541,6 @@ class OrchestratorToolBridge(
                 val repo = args.getRequiredString("repo")
                 val runId = args.getRequiredLong("run_id")
 
-                // ИНТЕЛЛЕКТУАЛЬНЫЙ ПОЛЛИНГ В КОТЛИНЕ (0 токенов): ждем реального завершения сборки
                 val finishedRun = gitHubEngine.pollWorkflowRunConclusion(
                     owner = owner,
                     repo = repo,
