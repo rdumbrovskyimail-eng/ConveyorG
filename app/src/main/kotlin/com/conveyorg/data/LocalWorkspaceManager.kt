@@ -283,6 +283,27 @@ class LocalWorkspaceManager(
         }
     }
 
+    suspend fun writeTextFileAtomic(
+        relativePath: String,
+        content: String,
+        isExecutable: Boolean? = null
+    ): File {
+        return writeFileAtomic(
+            relativePath = relativePath,
+            contentBytes = content.toByteArray(Charsets.UTF_8),
+            isExecutable = isExecutable
+        )
+    }
+
+    suspend fun writeBatchFilesAtomic(
+        files: Map<String, String>
+    ): List<String> = withContext(Dispatchers.IO) {
+        files.map { (path, text) ->
+            writeTextFileAtomic(path, text)
+            path
+        }
+    }
+
     suspend fun deleteFile(relativePath: String): Boolean = withContext(Dispatchers.IO) {
         withFileLock(relativePath) {
             val targetFile = resolveSafeFile(relativePath)
