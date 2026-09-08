@@ -468,7 +468,7 @@ class CompositeOrchestratorToolBridge(
         val swarmDeclarations = listOf(
             FunctionDeclarationDto(
                 name = "swarm_dispatch_primary_builder",
-                description = "Запускает автономного строителя 3.5 Lite (Класс A) для реализации 10% слоя архитектуры (этапы 1..10).",
+                description = "Запускает автономного строителя 3.5 Lite (Класс A) для реализации этапа архитектуры (этапы 1..10). Подходит для создания новых классов и интерфейсов.",
                 parameters = FunctionParametersSchemaDto(
                     properties = mapOf(
                         "stage_number" to ParameterPropertyDto(type = "INTEGER", description = "Номер этапа (1..10)."),
@@ -481,13 +481,13 @@ class CompositeOrchestratorToolBridge(
             ),
             FunctionDeclarationDto(
                 name = "swarm_dispatch_cross_builder",
-                description = "Запускает сквозного строителя 3.5 Lite (Класс B), который строго ожидает завершения указанного предшественника (Закон A -> B).",
+                description = "Запускает сквозного строителя 3.5 Lite (Класс B), который строго ожидает завершения указанного предшественника (Закон A -> B). Может как создавать новые зависимые классы, так и модифицировать существующие файлы.",
                 parameters = FunctionParametersSchemaDto(
                     properties = mapOf(
                         "dependency_task_id" to ParameterPropertyDto(type = "STRING", description = "ID родительской задачи, завершения которой нужно дождаться."),
                         "stage_number" to ParameterPropertyDto(type = "INTEGER", description = "Номер текущего этапа."),
-                        "target_file" to ParameterPropertyDto(type = "STRING", description = "Путь к файлу, в который вносится сквозная правка."),
-                        "instruction" to ParameterPropertyDto(type = "STRING", description = "Инструкция по модификации существующего файла.")
+                        "target_file" to ParameterPropertyDto(type = "STRING", description = "Путь к файлу для реализации или модификации."),
+                        "instruction" to ParameterPropertyDto(type = "STRING", description = "Инструкция по реализации или модификации файла.")
                     ),
                     required = listOf("dependency_task_id", "stage_number", "target_file", "instruction")
                 )
@@ -516,68 +516,83 @@ class CompositeOrchestratorToolBridge(
         call: FunctionCallDto,
         thoughtSignature: String?
     ): FunctionResponsePartDto {
-        return when (call.name) {
-            "swarm_dispatch_primary_builder" -> {
-                val stage = call.args["stage_number"]?.jsonPrimitive?.int ?: 1
-                val file = call.args["target_file"]?.jsonPrimitive?.content ?: "Unknown.kt"
-                val instruction = call.args["instruction"]?.jsonPrimitive?.content ?: ""
-                val refCode = call.args["reference_code"]?.jsonPrimitive?.contentOrNull
+        return try {
+            when (call.name) {
+                "swarm_dispatch_primary_builder" -> {
+                    val stage = call.args["stage_number"]?.jsonPrimitive?.int ?: 1
+                    val file = call.args["target_file"]?.jsonPrimitive?.content ?: "Unknown.kt"
+                    val instruction = call.args["instruction"]?.jsonPrimitive?.content ?: ""
+                    val refCode = call.args["reference_code"]?.jsonPrimitive?.contentOrNull
 
-                val taskId = swarmCoordinator.registerPrimaryBuilderA(stage, file, instruction, refCode)
-                createSuccessResponse(call.name, call.id, buildJsonObject {
-                    put("status", "registered")
-                    put("task_id", taskId)
-                    put("role", "PRIMARY_A")
-                    put("message", "Строитель A запущен в изолированном фоновом потоке.")
-                })
-            }
-            "swarm_dispatch_cross_builder" -> {
-                val depId = call.args["dependency_task_id"]?.jsonPrimitive?.content ?: ""
-                val stage = call.args["stage_number"]?.jsonPrimitive?.int ?: 1
-                val file = call.args["target_file"]?.jsonPrimitive?.content ?: "Unknown.kt"
-                val instruction = call.args["instruction"]?.jsonPrimitive?.content ?: ""
+                    val taskId = swarmCoordinator.registerPrimaryBuilderA(stage, file, instruction, refCode)
+                    createSuccessResponse(call.name, call.id, buildJsonObject {
+                        put("status", "registered")
+                        put("task_id", taskId)
+                        put("role", "PRIMARY_A")
+                        put("message", "Строитель A запущен в изолированном фоновом потоке.")
+                    })
+                }
+                "swarm_dispatch_cross_builder" -> {
+                    val depId = call.args["dependency_task_id"]?.jsonPrimitive?.content ?: ""
+                    val stage = call.args["stage_number"]?.jsonPrimitive?.int ?: 1
+                    val file = call.args["target_file"]?.jsonPrimitive?.content ?: "Unknown.kt"
+                    val instruction = call.args["instruction"]?.jsonPrimitive?.content ?: ""
 
-                val taskId = swarmCoordinator.registerCrossCuttingBuilderB(depId, stage, file, instruction)
-                createSuccessResponse(call.name, call.id, buildJsonObject {
-                    put("status", "registered_waiting")
-                    put("task_id", taskId)
-                    put("role", "CROSS_CUTTING_B")
-                    put("waiting_for", depId)
-                    put("message", "Сквозной строитель B заблокирован до получения отчета от $depId.")
-                })
-            }
-            "swarm_seal_barrier" -> {
-                val count = call.args["expected_count"]?.jsonPrimitive?.int ?: 20
-                val sealed = swarmCoordinator.sealBarrier(count)
-                createSuccessResponse(call.name, call.id, buildJsonObject {
-                    put("status", if (sealed) "sealed" else "error")
-                    put("expected_total", count)
-                    put("message", "Барьер запечатан. Обратный отсчет активирован.")
-                })
-            }
-            "swarm_get_reports_manifest" -> {
-                val manifest = swarmCoordinator.awaitGreenLight(timeoutMs = 120_000L)
-                createSuccessResponse(call.name, call.id, buildJsonObject {
-                    put("status", "green_light_manifest_ready")
-                    put("total_completed", manifest.totalCompleted)
-                    put("success_count", manifest.successCount)
-                    put("failed_count", manifest.failedCount)
-                    put("aborted_count", manifest.abortedCount)
-                    putJsonArray("reports_summary") {
-                        manifest.reports.forEach { r ->
-                            addJsonObject {
-                                put("task_id", r.taskId)
-                                put("target_file", r.targetFile)
-                                put("status", r.status)
-                                put("summary", r.summary)
+                    val taskId = swarmCoordinator.registerCrossCuttingBuilderB(depId, stage, file, instruction)
+                    createSuccessResponse(call.name, call.id, buildJsonObject {
+                        put("status", "registered_waiting")
+                        put("task_id", taskId)
+                        put("role", "CROSS_CUTTING_B")
+                        put("waiting_for", depId)
+                        put("message", "Сквозной строитель B заблокирован до получения отчета от $depId.")
+                    })
+                }
+                "swarm_seal_barrier" -> {
+                    val count = call.args["expected_count"]?.jsonPrimitive?.int ?: 20
+                    val sealed = swarmCoordinator.sealBarrier(count)
+                    createSuccessResponse(call.name, call.id, buildJsonObject {
+                        put("status", if (sealed) "sealed" else "error")
+                        put("expected_total", count)
+                        put("message", "Барьер запечатан. Обратный отсчет активирован.")
+                    })
+                }
+                "swarm_get_reports_manifest" -> {
+                    val manifest = swarmCoordinator.awaitGreenLight(timeoutMs = 120_000L)
+                    createSuccessResponse(call.name, call.id, buildJsonObject {
+                        put("status", "green_light_manifest_ready")
+                        put("total_completed", manifest.totalCompleted)
+                        put("success_count", manifest.successCount)
+                        put("failed_count", manifest.failedCount)
+                        put("aborted_count", manifest.abortedCount)
+                        putJsonArray("reports_summary") {
+                            manifest.reports.forEach { r ->
+                                addJsonObject {
+                                    put("task_id", r.taskId)
+                                    put("target_file", r.targetFile)
+                                    put("status", r.status)
+                                    put("summary", r.summary)
+                                }
                             }
                         }
-                    }
-                })
+                    })
+                }
+                else -> {
+                    baseBridge.dispatchToolCall(call, thoughtSignature)
+                }
             }
-            else -> {
-                baseBridge.dispatchToolCall(call, thoughtSignature)
-            }
+        } catch (e: Exception) {
+            AppLogger.e(AppLogger.TAG_ENGINE, "CompositeToolBridge: Ошибка исполнения '${call.name}': ${e.message}", e)
+            FunctionResponsePartDto(
+                functionResponse = FunctionResponseDto(
+                    name = call.name,
+                    response = buildJsonObject {
+                        put("status", "error")
+                        put("error_message", e.localizedMessage ?: "Сбой выполнения инструмента роя")
+                        put("tool", call.name)
+                    },
+                    id = call.id
+                )
+            )
         }
     }
 
