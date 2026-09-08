@@ -140,20 +140,28 @@ internal data class LiteContentDto(
 @Serializable
 internal data class LitePartDto(
     val text: String? = null,
+    @SerialName("thought_signature") val thoughtSignatureSnake: String? = null,
+    @SerialName("thoughtSignature") val thoughtSignatureCamel: String? = null,
     @SerialName("functionCall") val functionCall: LiteFunctionCallDto? = null,
     @SerialName("functionResponse") val functionResponse: LiteFunctionResponseDto? = null
-)
+) {
+    fun resolveThoughtSignature(): String? =
+        thoughtSignatureSnake?.takeIf { it.isNotBlank() }
+            ?: thoughtSignatureCamel?.takeIf { it.isNotBlank() }
+}
 
 @Serializable
 internal data class LiteFunctionCallDto(
     val name: String,
-    val args: JsonObject = JsonObject(emptyMap())
+    val args: JsonObject = JsonObject(emptyMap()),
+    val id: String? = null
 )
 
 @Serializable
 internal data class LiteFunctionResponseDto(
     val name: String,
-    val response: JsonObject
+    val response: JsonObject,
+    val id: String? = null
 )
 
 @Serializable
@@ -165,7 +173,8 @@ internal data class LiteGenerationConfigDto(
 @Serializable
 internal data class LiteUnaryResponse(
     val candidates: List<LiteCandidateDto>? = null,
-    val usageMetadata: LiteUsageMetadataDto? = null
+    val usageMetadata: LiteUsageMetadataDto? = null,
+    val error: GoogleApiErrorDto? = null
 )
 
 @Serializable
@@ -471,10 +480,26 @@ class BuilderSwarmCoordinator(
             totalCandidateTokens += response.usageMetadata?.candidatesTokenCount ?: 0
 
             val candidate = response.candidates?.firstOrNull() ?: break
-            val functionCall = candidate.content?.parts?.firstOrNull { it.functionCall != null }?.functionCall
+            val candidateContent = candidate.content ?: break
+            val functionCallPart = candidateContent.parts.firstOrNull { it.functionCall != null }
+            val functionCall = functionCallPart?.functionCall
 
             if (functionCall != null) {
-                conversation.add(LiteContentDto(role = "model", parts = listOf(LitePartDto(functionCall = functionCall))))
+                // Извлекаем сигнатуру мыслей (thought_signature) модели
+                val signature = functionCallPart.resolveThoughtSignature()
+                    ?: candidateContent.parts.firstOrNull { it.resolveThoughtSignature() != null }?.resolveThoughtSignature()
+
+                // Сохраняем ход модели с сохранением подписи thought_signature
+                val preservedModelParts = candidateContent.parts.map { part ->
+                    if (part.functionCall != null) {
+                        part.copy(
+                            thoughtSignatureSnake = signature ?: part.resolveThoughtSignature(),
+                            thoughtSignatureCamel = null
+                        )
+                    } else part
+                }
+
+                conversation.add(LiteContentDto(role = "model", parts = preservedModelParts))
 
                 val toolResult = when (functionCall.name) {
                     "sandbox_read_file" -> {
@@ -526,7 +551,15 @@ class BuilderSwarmCoordinator(
                 conversation.add(
                     LiteContentDto(
                         role = "tool",
-                        parts = listOf(LitePartDto(functionResponse = LiteFunctionResponseDto(functionCall.name, toolResult)))
+                        parts = listOf(
+                            LitePartDto(
+                                functionResponse = LiteFunctionResponseDto(
+                                    name = functionCall.name,
+                                    response = toolResult,
+                                    id = functionCall.id
+                                )
+                            )
+                        )
                     )
                 )
             } else {
