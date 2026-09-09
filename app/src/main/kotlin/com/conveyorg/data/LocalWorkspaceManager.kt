@@ -19,10 +19,6 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 import kotlin.math.min
 
-// ====================================================================
-// 1. Модели данных Локального Рабочего Пространства
-// ====================================================================
-
 data class FileReadResult(
     val relativePath: String,
     val content: String,
@@ -58,10 +54,6 @@ data class WorkspaceDeltaPayload(
     val modifiedCount: Int,
     val deletedCount: Int
 )
-
-// ====================================================================
-// 2. Локальный Менеджер Рабочего Пространства (LocalWorkspaceManager)
-// ====================================================================
 
 class LocalWorkspaceManager(
     val sessionId: String,
@@ -317,6 +309,13 @@ class LocalWorkspaceManager(
                 }
             }
             targetFile.delete()
+        }
+    }
+
+    fun hasConfiguredCiWorkflows(): Boolean {
+        val workflowDir = File(workspaceRoot, ".github/workflows")
+        return workflowDir.exists() && workflowDir.walkTopDown().any {
+            it.isFile && (it.extension.equals("yml", ignoreCase = true) || it.extension.equals("yaml", ignoreCase = true))
         }
     }
 
