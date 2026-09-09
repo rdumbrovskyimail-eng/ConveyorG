@@ -36,10 +36,13 @@ import kotlin.random.Random
 enum class OrchestratorPhase {
     IDLE,
     INITIALIZING_WORKSPACE,
-    RECONNAISSANCE_T0,        // Этап 1: Срез топологии без чтения файлов (LOW)
+    RECONNAISSANCE_T0,        // Этап 1: Сетевой рентген топологии GitHub API (LOW)
     FEASIBILITY_GATE_STAGE2,  // Этап 2: Семантический шлюз Истина / Ложь (HIGH)
     PHYSICAL_DEPLOY_STAGE3,   // Этап 3: Деплой архива на UFS 4.0, НЕ ЧИТАТЬ! (LOW)
     CODEBASE_AUDIT_STAGE4,    // Этап 4: Залповый беспристрастный аудит файлов (HIGH)
+    RESEARCH_STAGE_5A,        // Этап 5a: Глубокое изучение 100 первоисточников (HIGH)
+    RESEARCH_STAGE_5B,        // Этап 5b: Изучение 100 иных первоисточников (HIGH)
+    RESEARCH_STAGE_5C,        // Этап 5c: Изучение 100 иных первоисточников, волна 3 (HIGH)
     REASONING_AND_PLANNING,
     EXECUTING_TOOL,
     AWAITING_BARRIER,
@@ -107,6 +110,7 @@ data class AutonomousTaskResult(
 
 @Serializable
 internal data class AgentWireRequest(
+    @SerialName("cachedContent") val cachedContent: String? = null,
     @SerialName("systemInstruction") val systemInstruction: AgentSystemInstructionDto? = null,
     val contents: List<AgentContentDto>,
     val tools: List<GeminiToolDto>? = null,
@@ -153,7 +157,25 @@ internal data class AgentResponseChunk(
 @Serializable
 internal data class AgentCandidateDto(
     val content: AgentContentDto? = null,
-    val finishReason: String? = null
+    val finishReason: String? = null,
+    val groundingMetadata: AgentGroundingMetadataDto? = null
+)
+
+@Serializable
+internal data class AgentGroundingMetadataDto(
+    val webSearchQueries: List<String>? = null,
+    val groundingChunks: List<AgentGroundingChunkDto>? = null
+)
+
+@Serializable
+internal data class AgentGroundingChunkDto(
+    val web: AgentWebDto? = null
+)
+
+@Serializable
+internal data class AgentWebDto(
+    val uri: String? = null,
+    val title: String? = null
 )
 
 @Serializable
@@ -183,12 +205,17 @@ class AutonomousOrchestrator(
     private val loopMutex = Mutex()
 
     companion object {
-        private const val GEMINI_BASE_URL = "https://aiplatform.googleapis.com/v1/publishers/google/models"
+        private const val GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
         private const val MODEL_NAME = "gemini-3.8-flash"
         private const val WAKELOCK_TAG = "ClientG:AutonomousOrchestrator"
 
         private const val BASELINE_BACKOFF_MS = 1500L
         private const val MAX_BACKOFF_MS = 16000L
+
+        // ЖЕЛЕЗНЫЕ ЭТАЛОННЫЕ ПРОМПТЫ ЭТАПА 5 (НЕ ИЗМЕНЯТЬ НИ ОДНОГО СИМВОЛА):
+        private const val PROMPT_STAGE_5A = "Проанализируй и максимально глубоко изучи 100 первоисточников в интернете, по данным запроса клиента, и кодовой базы проекта. Данные запиши в лог и запомни."
+        private const val PROMPT_STAGE_5B = "изучи 100 иных первоисточников в интернете, по данным запроса клиента, и кодовой базы проекта. Данные запиши в лог и запомни."
+        private const val PROMPT_STAGE_5C = "изучи 100 иных первоисточников в интернете, по данным запроса клиента, и кодовой базы проекта. Данные запиши в лог и запомни."
 
         @OptIn(ExperimentalSerializationApi::class)
         private val json = Json {
@@ -240,23 +267,25 @@ class AutonomousOrchestrator(
             var repairRound = 0
             var currentStep = 0
             var nextThinkingLevel = "LOW"
+            var pinnedCacheId: String? = null
 
             val recentToolCalls = ArrayDeque<String>(6)
 
             try {
                 // ====================================================================
-                // ЭТАП 1: $T_0$ РЕКОГНОСЦИРОВКА (РЕЖИМ LOW) — СТРУКТУРА БЕЗ ЧТЕНИЯ ТЕЛ
+                // ЭТАП 1: $T_0$ РЕКОГНОСЦИРОВКА (СЕТЕВОЙ РЕНТГЕН GITHUB API, РЕЖИМ LOW)
                 // ====================================================================
                 _state.update {
                     it.copy(
                         phase = OrchestratorPhase.RECONNAISSANCE_T0,
-                        statusMessage = "Этап 1: Рекогносцировка T0 (структурный рентген в LOW)..."
+                        statusMessage = "Этап 1: Сетевой структурный срез T0 (GitHub API, режим LOW)..."
                     )
                 }
                 _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.RECONNAISSANCE_T0, "Этап 1: Рекогносцировка T0"))
 
-                val treeDto = workspaceManager.getProjectTree(maxDepth = 6)
-                val t0PassportText = performT0Reconnaissance(owner, repo, branch, userObjective, treeDto)
+                val remoteTree = gitHubEngine.getTreeRecursive(owner, repo, branch)
+                val isRemoteEmpty = remoteTree.tree.isEmpty()
+                val t0PassportText = performT0Reconnaissance(owner, repo, branch, userObjective, remoteTree)
                 appendDeepLog(t0PassportText)
 
                 // ====================================================================
@@ -303,7 +332,8 @@ class AutonomousOrchestrator(
                 }
                 _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.PHYSICAL_DEPLOY_STAGE3, "Этап 3: Физический деплой"))
 
-                if (existingWorkspaceManager == null) {
+                // Устранение Коллизии 2: проверка пустоты песочницы вместо existingWorkspaceManager
+                if (!isRemoteEmpty && workspaceManager.isWorkspaceEmpty()) {
                     gitHubEngine.downloadAndUnpackZipball(owner, repo, branch, workspaceManager.workspaceRoot)
                 }
                 val baselineCount = workspaceManager.captureBaseline()
@@ -328,8 +358,27 @@ class AutonomousOrchestrator(
                 _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.CODEBASE_AUDIT_STAGE4, "Этап 4: Тотальный аудит"))
 
                 val allFilesBundle = workspaceManager.collectAllTextFilesForAudit()
+                val codebaseBundleString = buildCodebaseXmlPayload(allFilesBundle)
+
+                // Устранение Коллизии 3: фиксация бандла в TPU Context Cache при размере >= 120 000 символов
+                if (codebaseBundleString.length >= 120_000) {
+                    pinnedCacheId = pinCodebaseContextCache(codebaseBundleString)
+                }
+
                 val auditReportText = performStage4CodebaseAudit(owner, repo, branch, allFilesBundle)
                 appendDeepLog(auditReportText)
+
+                // ====================================================================
+                // ЭТАП 5: ГЛУБОКОЕ ИССЛЕДОВАНИЕ 300 ПЕРВОИСТОЧНИКОВ (5A -> 5B -> 5C)
+                // ====================================================================
+                val stage5ResearchLog = executeStage5TripleWaveResearch(
+                    owner = owner,
+                    repo = repo,
+                    branch = branch,
+                    userObjective = userObjective,
+                    auditReport = auditReportText,
+                    cachedContentId = pinnedCacheId
+                )
 
                 // ====================================================================
                 // ПЕРЕХОД К ПЛАНИРОВАНИЮ И РЕАЛИЗАЦИИ
@@ -340,14 +389,25 @@ class AutonomousOrchestrator(
                 conversationHistory.add(
                     AgentContentDto(
                         role = "user",
-                        parts = listOf(AgentPartDto(text = buildInitialUserPrompt(userObjective, baselineCount, t0PassportText, stage2Result, auditReportText)))
+                        parts = listOf(
+                            AgentPartDto(
+                                text = buildInitialUserPrompt(
+                                    objective = userObjective,
+                                    totalFiles = baselineCount,
+                                    t0Passport = t0PassportText,
+                                    stage2Result = stage2Result,
+                                    auditReport = auditReportText,
+                                    stage5Research = stage5ResearchLog
+                                )
+                            )
+                        )
                     )
                 )
 
                 _state.update {
                     it.copy(
                         phase = OrchestratorPhase.REASONING_AND_PLANNING,
-                        statusMessage = "Кодовая база изучена. Планирование реализации..."
+                        statusMessage = "Исследование 300 источников завершено. Планирование реализации..."
                     )
                 }
 
@@ -360,7 +420,8 @@ class AutonomousOrchestrator(
                         systemPrompt = systemPrompt,
                         history = conversationHistory,
                         toolDeclarations = toolBridge.getToolDeclarations(),
-                        thinkingLevel = nextThinkingLevel
+                        thinkingLevel = nextThinkingLevel,
+                        cachedContentId = pinnedCacheId
                     )
 
                     val functionCalls = modelTurn.parts.mapNotNull { it.functionCall }
@@ -462,6 +523,7 @@ class AutonomousOrchestrator(
                 _state.update { it.copy(phase = OrchestratorPhase.FAILED, errorMessage = finalMessage) }
             } finally {
                 withContext(NonCancellable) {
+                    deleteCodebaseContextCache(pinnedCacheId)
                     releaseWakeLock()
                     val finalPhase = if (isTaskSucceeded) OrchestratorPhase.COMPLETED else OrchestratorPhase.FAILED
                     _state.update { it.copy(phase = finalPhase, statusMessage = finalMessage) }
@@ -485,19 +547,28 @@ class AutonomousOrchestrator(
     }
 
     // ====================================================================
-    // ЭТАП 1: РЕКОГНОСЦИРОВКА T0 (РЕЖИМ LOW) — ТОПОЛОГИЯ БЕЗ ЧТЕНИЯ ТЕЛ
+    // ЭТАП 1: РЕКОГНОСЦИРОВКА T0 (РЕЖИМ LOW) — ТОПОЛОГИЯ GITHUB БЕЗ СКАЧИВАНИЯ
     // ====================================================================
     private suspend fun performT0Reconnaissance(
         owner: String,
         repo: String,
         branch: String,
         userObjective: String,
-        tree: com.conveyorg.data.WorkspaceTreeDto
+        remoteTree: GitHubTreeResponseDto
     ): String {
+        val blobs = remoteTree.tree.filter { it.type == "blob" }
+        val trees = remoteTree.tree.filter { it.type == "tree" }
+        val totalBytes = blobs.sumOf { it.size ?: 0L }
+
         val treeListing = buildString {
-            appendLine("Файлов: ${tree.totalFiles}, Директорий: ${tree.totalDirectories}")
-            tree.nodes.take(200).forEach { node ->
-                appendLine("- ${if (node.isDirectory) "[DIR]" else "[FILE]"} ${node.path} (${node.sizeBytes} байт)")
+            appendLine("Файлов: ${blobs.size}, Директорий: ${trees.size}, Общий объем: $totalBytes байт")
+            if (remoteTree.truncated) {
+                appendLine("[ВНИМАНИЕ: Дерево превысило квоту GitHub API и усечено]")
+            }
+            remoteTree.tree.take(250).forEach { entry ->
+                val kind = if (entry.type == "tree") "[DIR]" else "[FILE]"
+                val sizeStr = entry.size?.let { " ($it байт)" } ?: ""
+                appendLine("- $kind ${entry.path}$sizeStr")
             }
         }
 
@@ -587,6 +658,21 @@ class AutonomousOrchestrator(
         return Stage2FeasibilityResult(isFeasible, verdictLabel, explanation, logEntry)
     }
 
+    private fun buildCodebaseXmlPayload(filesMap: Map<String, String>): String = buildString {
+        if (filesMap.isEmpty()) {
+            appendLine("[В репозитории отсутствуют текстовые файлы исходного кода. Репозиторий чист.]")
+        } else {
+            appendLine("<repository_codebase>")
+            filesMap.forEach { (path, content) ->
+                appendLine("<file path=\"$path\">")
+                appendLine(content.take(15000))
+                if (content.length > 15000) appendLine("... [Файл усечен для аудита]")
+                appendLine("</file>")
+            }
+            appendLine("</repository_codebase>")
+        }
+    }
+
     // ====================================================================
     // ЭТАП 4: ТОТАЛЬНЫЙ БЕСПРИСТРАСТНЫЙ АУДИТ КОДОВОЙ БАЗЫ (РЕЖИМ HIGH)
     // ====================================================================
@@ -596,20 +682,7 @@ class AutonomousOrchestrator(
         branch: String,
         filesMap: Map<String, String>
     ): String {
-        val codebasePayload = buildString {
-            if (filesMap.isEmpty()) {
-                appendLine("[В репозитории отсутствуют текстовые файлы исходного кода. Репозиторий чист.]")
-            } else {
-                appendLine("<repository_codebase>")
-                filesMap.forEach { (path, content) ->
-                    appendLine("<file path=\"$path\">")
-                    appendLine(content.take(15000))
-                    if (content.length > 15000) appendLine("... [Файл усечен для аудита]")
-                    appendLine("</file>")
-                }
-                appendLine("</repository_codebase>")
-            }
-        }
+        val codebasePayload = buildCodebaseXmlPayload(filesMap)
 
         // ЖЕЛЕЗНЫЙ ЭТАЛОННЫЙ ПРОМПТ НАБЛЮДАТЕЛЯ:
         val prompt = "Изучи полностью весь репозиторий, максимально глубоко, каждый файл от корня до конца, как только сможешь. " +
@@ -620,7 +693,7 @@ class AutonomousOrchestrator(
         val turn = executeSingleGeminiTurn(
             systemPrompt = "Ты — беспристрастный пассивный аналитик-наблюдатель. Твоя единственная цель — составить исчерпывающий технический отчет о том, что реально существует в кодовой базе. Ничего не создавай и не вызывай инструментов.",
             history = listOf(AgentContentDto(role = "user", parts = listOf(AgentPartDto(text = prompt)))),
-            toolDeclarations = GeminiToolDto(functionDeclarations = emptyList()), // tools = null
+            toolDeclarations = GeminiToolDto(functionDeclarations = emptyList()),
             thinkingLevel = "HIGH"
         )
 
@@ -630,22 +703,175 @@ class AutonomousOrchestrator(
                "\n=============================================="
     }
 
+    // ====================================================================
+    // ЭТАП 5: ТРЕХВОЛНОВОЕ ИССЛЕДОВАНИЕ 300 ПЕРВОИСТОЧНИКОВ (5A -> 5B -> 5C)
+    // ====================================================================
+    private suspend fun executeStage5TripleWaveResearch(
+        owner: String,
+        repo: String,
+        branch: String,
+        userObjective: String,
+        auditReport: String,
+        cachedContentId: String?
+    ): String {
+        val searchTool = GeminiToolDto(googleSearch = emptyMap())
+        val researchSystemPrompt = "Ты — ведущий исследователь-аналитик ClientG на базе Gemini 3.8 Flash.\n" +
+                "Репозиторий: '$owner/$repo' (ветка: '$branch').\n" +
+                "Задача клиента:\n$userObjective\n\n" +
+                "Аудит кодовой базы проекта (Этап 4):\n$auditReport"
+
+        val researchHistory = mutableListOf<AgentContentDto>()
+
+        // --------------------------------------------------------------------
+        // Подэтап 5a
+        // --------------------------------------------------------------------
+        _state.update {
+            it.copy(
+                phase = OrchestratorPhase.RESEARCH_STAGE_5A,
+                statusMessage = "Этап 5a: Анализ первых 100 первоисточников в сети (HIGH)..."
+            )
+        }
+        _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.RESEARCH_STAGE_5A, "Этап 5a: 100 первоисточников"))
+
+        researchHistory.add(AgentContentDto(role = "user", parts = listOf(AgentPartDto(text = PROMPT_STAGE_5A))))
+
+        val turn5a = executeGeminiTurnWithRetry(
+            systemPrompt = researchSystemPrompt,
+            history = researchHistory,
+            toolDeclarations = searchTool,
+            thinkingLevel = "HIGH",
+            cachedContentId = cachedContentId
+        )
+        researchHistory.add(turn5a)
+
+        val result5a = turn5a.parts.filter { it.thought != true }.mapNotNull { it.text }.joinToString("\n").trim()
+        val entry5a = "=== [ЭТАП 5A: ИССЛЕДОВАНИЕ 100 ПЕРВОИСТОЧНИКОВ] ===\n" +
+                result5a.ifBlank { "Исследование первых 100 первоисточников зафиксировано." } +
+                "\n================================================="
+        appendDeepLog(entry5a)
+
+        // --------------------------------------------------------------------
+        // Подэтап 5b
+        // --------------------------------------------------------------------
+        _state.update {
+            it.copy(
+                phase = OrchestratorPhase.RESEARCH_STAGE_5B,
+                statusMessage = "Этап 5b: Анализ 100 иных первоисточников в сети (HIGH)..."
+            )
+        }
+        _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.RESEARCH_STAGE_5B, "Этап 5b: 100 иных первоисточников"))
+
+        researchHistory.add(AgentContentDto(role = "user", parts = listOf(AgentPartDto(text = PROMPT_STAGE_5B))))
+
+        val turn5b = executeGeminiTurnWithRetry(
+            systemPrompt = researchSystemPrompt,
+            history = researchHistory,
+            toolDeclarations = searchTool,
+            thinkingLevel = "HIGH",
+            cachedContentId = cachedContentId
+        )
+        researchHistory.add(turn5b)
+
+        val result5b = turn5b.parts.filter { it.thought != true }.mapNotNull { it.text }.joinToString("\n").trim()
+        val entry5b = "=== [ЭТАП 5B: ИССЛЕДОВАНИЕ 100 ИНЫХ ПЕРВОИСТОЧНИКОВ] ===\n" +
+                result5b.ifBlank { "Исследование второй волны первоисточников зафиксировано." } +
+                "\n======================================================"
+        appendDeepLog(entry5b)
+
+        // --------------------------------------------------------------------
+        // Подэтап 5c
+        // --------------------------------------------------------------------
+        _state.update {
+            it.copy(
+                phase = OrchestratorPhase.RESEARCH_STAGE_5C,
+                statusMessage = "Этап 5c: Анализ 100 иных первоисточников, волна 3 (HIGH)..."
+            )
+        }
+        _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.RESEARCH_STAGE_5C, "Этап 5c: 100 иных первоисточников (волна 3)"))
+
+        researchHistory.add(AgentContentDto(role = "user", parts = listOf(AgentPartDto(text = PROMPT_STAGE_5C))))
+
+        val turn5c = executeGeminiTurnWithRetry(
+            systemPrompt = researchSystemPrompt,
+            history = researchHistory,
+            toolDeclarations = searchTool,
+            thinkingLevel = "HIGH",
+            cachedContentId = cachedContentId
+        )
+        researchHistory.add(turn5c)
+
+        val result5c = turn5c.parts.filter { it.thought != true }.mapNotNull { it.text }.joinToString("\n").trim()
+        val entry5c = "=== [ЭТАП 5C: ИССЛЕДОВАНИЕ 100 ИНЫХ ПЕРВОИСТОЧНИКОВ (ВОЛНА 3)] ===\n" +
+                result5c.ifBlank { "Исследование третьей волны первоисточников зафиксировано." } +
+                "\n=============================================================="
+        appendDeepLog(entry5c)
+
+        return "$entry5a\n\n$entry5b\n\n$entry5c"
+    }
+
     private fun appendDeepLog(text: String) {
         val timestamped = "\n\n$text"
         _state.update { it.copy(deepInvestigationLog = it.deepInvestigationLog + timestamped) }
         _events.tryEmit(OrchestratorEvent.DeepLogAppended(timestamped))
     }
 
+    private suspend fun pinCodebaseContextCache(
+        codebasePayload: String,
+        ttlSeconds: Long = 7200L
+    ): String? = withContext(Dispatchers.IO) {
+        val apiKey = geminiApiKeyProvider().trim()
+        if (apiKey.isBlank() || codebasePayload.length < 120_000) return@withContext null
+
+        val endpoint = "$GEMINI_BASE_URL/cachedContents?key=$apiKey"
+        val requestPayload = buildJsonObject {
+            put("model", "models/$MODEL_NAME")
+            putJsonArray("contents") {
+                addJsonObject {
+                    put("role", "user")
+                    putJsonArray("parts") {
+                        addJsonObject { put("text", codebasePayload) }
+                    }
+                }
+                addJsonObject {
+                    put("role", "model")
+                    putJsonArray("parts") {
+                        addJsonObject { put("text", "Кодовая база зафиксирована в памяти Google TPU.") }
+                    }
+                }
+            }
+            put("ttl", "${ttlSeconds}s")
+        }
+
+        runCatching {
+            val response = httpClient.post(endpoint) {
+                contentType(ContentType.Application.Json)
+                setBody(requestPayload.toString())
+            }
+            if (response.status.isSuccess()) {
+                val respObj = json.parseToJsonElement(response.bodyAsText()).jsonObject
+                respObj["name"]?.jsonPrimitive?.contentOrNull
+            } else null
+        }.getOrNull()
+    }
+
+    private suspend fun deleteCodebaseContextCache(cachedName: String?) = withContext(Dispatchers.IO) {
+        if (cachedName.isNullOrBlank()) return@withContext
+        val apiKey = geminiApiKeyProvider().trim()
+        if (apiKey.isBlank()) return@withContext
+        runCatching { httpClient.delete("$GEMINI_BASE_URL/$cachedName?key=$apiKey") }
+    }
+
     private suspend fun executeGeminiTurnWithRetry(
         systemPrompt: String,
         history: List<AgentContentDto>,
         toolDeclarations: GeminiToolDto,
-        thinkingLevel: String
+        thinkingLevel: String,
+        cachedContentId: String? = null
     ): AgentContentDto {
         var attempt = 0
         while (attempt < 4) {
             try {
-                return executeSingleGeminiTurn(systemPrompt, history, toolDeclarations, thinkingLevel)
+                return executeSingleGeminiTurn(systemPrompt, history, toolDeclarations, thinkingLevel, cachedContentId)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 attempt++
@@ -661,17 +887,21 @@ class AutonomousOrchestrator(
         systemPrompt: String,
         history: List<AgentContentDto>,
         toolDeclarations: GeminiToolDto,
-        thinkingLevel: String
+        thinkingLevel: String,
+        cachedContentId: String? = null
     ): AgentContentDto = withContext(Dispatchers.IO) {
         val apiKey = geminiApiKeyProvider().trim()
-        val endpoint = "$GEMINI_BASE_URL/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
+        val endpoint = "$GEMINI_BASE_URL/models/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
 
         val sanitizedHistory = sanitizeHistoryForWire(history)
+        val hasTools = !toolDeclarations.functionDeclarations.isNullOrEmpty() || toolDeclarations.googleSearch != null
+        val wireTools = if (hasTools) listOf(toolDeclarations) else null
 
         val requestPayload = AgentWireRequest(
+            cachedContent = cachedContentId,
             systemInstruction = AgentSystemInstructionDto(listOf(AgentPartDto(text = systemPrompt))),
             contents = sanitizedHistory,
-            tools = if (toolDeclarations.functionDeclarations.isNullOrEmpty()) null else listOf(toolDeclarations),
+            tools = wireTools,
             generationConfig = AgentGenerationConfigDto(
                 maxOutputTokens = 65536,
                 thinkingConfig = AgentThinkingConfigDto(thinkingLevel = thinkingLevel, includeThoughts = true)
@@ -802,7 +1032,7 @@ class AutonomousOrchestrator(
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
         wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG)?.apply {
             setReferenceCounted(false)
-            acquire(15 * 60 * 1000L)
+            acquire(30 * 60 * 1000L)
         }
     }
 
@@ -827,13 +1057,15 @@ class AutonomousOrchestrator(
         totalFiles: Int,
         t0Passport: String,
         stage2Result: Stage2FeasibilityResult,
-        auditReport: String
+        auditReport: String,
+        stage5Research: String
     ): String {
         return "$t0Passport\n\n" +
                "${stage2Result.logFormattedEntry}\n\n" +
                "$auditReport\n\n" +
+               "$stage5Research\n\n" +
                "ЦЕЛЕВАЯ ЗАДАЧА КЛИЕНТА:\n$objective\n\n" +
-               "Файлов в репозитории: $totalFiles. Кодовая база изучена и зафиксирована. Приступай к планированию и реализации."
+               "Файлов в репозитории: $totalFiles. Кодовая база и 300 первоисточников изучены и зафиксированы. Приступай к планированию и реализации."
     }
 
     fun cancelTask() {
