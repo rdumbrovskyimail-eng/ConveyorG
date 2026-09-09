@@ -107,6 +107,7 @@ data class GitTreeEntryDto(
     val mode: String,
     val type: String,
     val sha: String? = null,
+    val size: Long? = null,
     val content: String? = null
 )
 
@@ -441,6 +442,31 @@ class GitHubEngine(
         }
         checkResponseErrors(response)
         json.decodeFromString(GitHubRefDto.serializer(), response.bodyAsText())
+    }
+
+    suspend fun getTreeRecursive(
+        owner: String,
+        repo: String,
+        branch: String
+    ): GitHubTreeResponseDto = withContext(Dispatchers.IO) {
+        val token = getAuthToken()
+        val cleanBranch = branch.removePrefix("refs/heads/").removePrefix("heads/")
+        val endpoint = "$API_BASE_URL/repos/$owner/$repo/git/trees/$cleanBranch?recursive=1"
+
+        val response = httpClient.get(endpoint) {
+            applyStandardHeaders(token)
+        }
+
+        if (response.status == HttpStatusCode.NotFound || response.status == HttpStatusCode.Conflict) {
+            return@withContext GitHubTreeResponseDto(
+                sha = "",
+                url = "",
+                tree = emptyList(),
+                truncated = false
+            )
+        }
+        checkResponseErrors(response)
+        json.decodeFromString(GitHubTreeResponseDto.serializer(), response.bodyAsText())
     }
 
     suspend fun deleteRef(owner: String, repo: String, ref: String): Boolean = withContext(Dispatchers.IO) {
