@@ -128,6 +128,11 @@ class LocalWorkspaceManager(
         scannedCount
     }
 
+    fun isWorkspaceEmpty(): Boolean {
+        val files = workspaceRoot.listFiles()
+        return files.isNullOrEmpty() || files.all { it.name.startsWith(".baseline") }
+    }
+
     private fun calculateSha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
         FileInputStream(file).use { fis ->
