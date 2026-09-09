@@ -10,10 +10,6 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 
-// ====================================================================
-// 1. DTO Спецификации Function Calling (OpenAPI 3.03 / Gemini REST v1beta)
-// ====================================================================
-
 @Serializable
 data class GeminiToolDto(
     @SerialName("functionDeclarations") val functionDeclarations: List<FunctionDeclarationDto>? = null,
@@ -71,18 +67,10 @@ data class ToolExecutionResult(
     val thoughtSignature: String? = null
 )
 
-// ====================================================================
-// 2. Базовый Контракт Моста Инструментов
-// ====================================================================
-
 interface OrchestratorBridge {
     fun getToolDeclarations(): GeminiToolDto
     suspend fun dispatchToolCall(call: FunctionCallDto, thoughtSignature: String? = null): FunctionResponsePartDto
 }
-
-// ====================================================================
-// 3. Эталонный Мост Инструментов: OrchestratorToolBridge
-// ====================================================================
 
 class OrchestratorToolBridge(
     private val workspaceManager: LocalWorkspaceManager,
@@ -90,7 +78,7 @@ class OrchestratorToolBridge(
 ) : OrchestratorBridge {
 
     companion object {
-        private const val TOOL_EXECUTION_TIMEOUT_MS = 360_000L
+        private const val TOOL_EXECUTION_TIMEOUT_MS = 60_000L
         private const val MAX_OUTPUT_CHARS = 40_000
 
         @OptIn(ExperimentalSerializationApi::class)
@@ -107,7 +95,7 @@ class OrchestratorToolBridge(
             functionDeclarations = listOf(
                 FunctionDeclarationDto(
                     name = "workspace_get_tree",
-                    description = "Возвращает структуру дерева локального репозитория. Используйте для понимания структуры папок и пакетов перед началом работы.",
+                    description = "Возвращает структуру дерева локального репозитория.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
                             "max_depth" to ParameterPropertyDto(
@@ -119,20 +107,20 @@ class OrchestratorToolBridge(
                 ),
                 FunctionDeclarationDto(
                     name = "workspace_read_file",
-                    description = "Читает содержимое локального файла из рабочей области. Поддерживает постраничное чтение для экономии токенов.",
+                    description = "Читает содержимое локального файла из рабочей области. Поддерживает постраничное чтение.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
                             "path" to ParameterPropertyDto(
                                 type = "STRING",
-                                description = "Относительный POSIX-путь к файлу (например, app/src/main/AndroidManifest.xml)."
+                                description = "Относительный путь к файлу."
                             ),
                             "start_line" to ParameterPropertyDto(
                                 type = "INTEGER",
-                                description = "Начальный номер строки для чтения (1-based, опционально)."
+                                description = "Начальный номер строки (1-based, опционально)."
                             ),
                             "end_line" to ParameterPropertyDto(
                                 type = "INTEGER",
-                                description = "Конечный номер строки для чтения (включительно, опционально)."
+                                description = "Конечный номер строки (опционально)."
                             )
                         ),
                         required = listOf("path")
@@ -140,20 +128,20 @@ class OrchestratorToolBridge(
                 ),
                 FunctionDeclarationDto(
                     name = "workspace_write_file",
-                    description = "Атомарно создает или перезаписывает локальный текстовый файл в песочнице. Используйте для прямой записи служебных файлов (.gitignore, .gitattributes, gradle.properties), скриптов или отдельных классов без запуска роя.",
+                    description = "Атомарно записывает текстовый файл на диск. Применяйте для конфигов (.gitignore, .gitattributes, gradle.properties), мелких скриптов и правок без вызова роя.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
                             "path" to ParameterPropertyDto(
                                 type = "STRING",
-                                description = "Относительный путь к файлу (например, .gitignore или build.gradle.kts)."
+                                description = "Относительный путь к файлу."
                             ),
                             "content" to ParameterPropertyDto(
                                 type = "STRING",
-                                description = "Полный исходный текст файла без Markdown-оберток."
+                                description = "Полный исходный код файла без Markdown-разметки."
                             ),
                             "is_executable" to ParameterPropertyDto(
                                 type = "BOOLEAN",
-                                description = "Установить ли права на исполнение chmod +x (true для gradlew и .sh файлов)."
+                                description = "Установить chmod +x (true для gradlew и .sh файлов)."
                             )
                         ),
                         required = listOf("path", "content")
@@ -161,12 +149,12 @@ class OrchestratorToolBridge(
                 ),
                 FunctionDeclarationDto(
                     name = "workspace_batch_write",
-                    description = "Атомарно записывает группу файлов за один шаг. Идеально для одновременного создания .gitignore, .gitattributes и сборочных скриптов за один вызов.",
+                    description = "Атомарно создает группу файлов за 1 шаг. Идеально для одновременного создания .gitignore, .gitattributes и сборочных файлов.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
                             "files" to ParameterPropertyDto(
                                 type = "OBJECT",
-                                description = "Словарь вида { 'путь_к_файлу': 'содержимое_файла' }.",
+                                description = "Словарь вида { 'путь': 'содержимое' }.",
                                 properties = emptyMap()
                             )
                         ),
@@ -175,12 +163,12 @@ class OrchestratorToolBridge(
                 ),
                 FunctionDeclarationDto(
                     name = "workspace_delete_file",
-                    description = "Удаляет локальный файл из рабочей области репозитория.",
+                    description = "Удаляет локальный файл из рабочей области.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
                             "path" to ParameterPropertyDto(
                                 type = "STRING",
-                                description = "Относительный путь к удаляемому файлу."
+                                description = "Относительный путь к файлу."
                             )
                         ),
                         required = listOf("path")
@@ -188,136 +176,124 @@ class OrchestratorToolBridge(
                 ),
                 FunctionDeclarationDto(
                     name = "workspace_search_symbol",
-                    description = "Выполняет быстрый полнотекстовый поиск (Grep) строки, имени класса или функции по файлам проекта на диске телефона.",
+                    description = "Выполняет быстрый поиск символа (Grep) по проекту.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
-                            "query" to ParameterPropertyDto(
-                                type = "STRING",
-                                description = "Поисковая строка или сигнатура символа."
-                            ),
+                            "query" to ParameterPropertyDto(type = "STRING", description = "Строка поиска."),
                             "file_extensions" to ParameterPropertyDto(
                                 type = "ARRAY",
-                                description = "Фильтр по расширениям файлов (например, ['kt', 'kts', 'xml']).",
-                                items = ParameterPropertyDto(type = "STRING", description = "Расширение файла без точки")
+                                description = "Фильтр расширений (например, ['kt', 'kts']).",
+                                items = ParameterPropertyDto(type = "STRING", description = "Расширение")
                             ),
-                            "max_results" to ParameterPropertyDto(
-                                type = "INTEGER",
-                                description = "Лимит количества совпадений (по умолчанию 50)."
-                            )
+                            "max_results" to ParameterPropertyDto(type = "INTEGER", description = "Лимит результатов (по умолчанию 50).")
                         ),
                         required = listOf("query")
                     )
                 ),
                 FunctionDeclarationDto(
                     name = "workspace_read_diff",
-                    description = "Генерирует сводный Unified Diff всех измененных, добавленных и удаленных файлов относительно исходного снимка репозитория.",
-                    parameters = FunctionParametersSchemaDto(
-                        properties = emptyMap()
-                    )
+                    description = "Генерирует сводный Unified Diff всех локальных изменений.",
+                    parameters = FunctionParametersSchemaDto(properties = emptyMap())
                 ),
                 FunctionDeclarationDto(
                     name = "github_push_atomic_commit",
-                    description = "Вычисляет дельту измененных и удаленных файлов на диске телефона, создает блобы, дерево и отправляет в ветку GitHub ОДНИМ атомарным коммитом.",
+                    description = "Формирует дельту на диске, создает блобы, дерево и отправляет в ветку GitHub ОДНИМ атомарным коммитом.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
-                            "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец репозитория (пользователь или организация)."),
+                            "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец репозитория."),
                             "repo" to ParameterPropertyDto(type = "STRING", description = "Имя репозитория."),
-                            "branch" to ParameterPropertyDto(type = "STRING", description = "Целевая ветка (например, main или refactor/logic)."),
-                            "commit_message" to ParameterPropertyDto(type = "STRING", description = "Сообщение коммита по стандарту Conventional Commits.")
+                            "branch" to ParameterPropertyDto(type = "STRING", description = "Целевая ветка."),
+                            "commit_message" to ParameterPropertyDto(type = "STRING", description = "Сообщение коммита.")
                         ),
                         required = listOf("owner", "repo", "branch", "commit_message")
                     )
                 ),
                 FunctionDeclarationDto(
                     name = "github_trigger_ci_build",
-                    description = "Запускает сборку проекта (Workflow Dispatch) в GitHub Actions. Вызывайте ТОЛЬКО если в репозитории есть настроенный воркфлоу в .github/workflows/.",
+                    description = "Запускает GitHub Actions. Вызывайте ТОЛЬКО если в .github/workflows/*.yml есть настроенный workflow.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
-                            "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец репозитория."),
-                            "repo" to ParameterPropertyDto(type = "STRING", description = "Имя репозитория."),
-                            "workflow_id" to ParameterPropertyDto(type = "STRING", description = "Имя файла воркфлоу (например, ci.yml)."),
-                            "ref" to ParameterPropertyDto(type = "STRING", description = "Имя ветки, для которой запускается CI.")
+                            "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец."),
+                            "repo" to ParameterPropertyDto(type = "STRING", description = "Репозиторий."),
+                            "workflow_id" to ParameterPropertyDto(type = "STRING", description = "Имя файла воркфлоу."),
+                            "ref" to ParameterPropertyDto(type = "STRING", description = "Ветка.")
                         ),
                         required = listOf("owner", "repo", "workflow_id", "ref")
                     )
                 ),
                 FunctionDeclarationDto(
                     name = "github_get_ci_status",
-                    description = "Опрашивает статус сборщика Actions. Инструмент ожидает в фоне завершения сборки и возвращает итоговый вердикт. Не вызывайте, если CI не запущен.",
+                    description = "Опрашивает статус Actions. Вызывайте ТОЛЬКО если CI запущен и есть реальный run_id.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
-                            "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец репозитория."),
-                            "repo" to ParameterPropertyDto(type = "STRING", description = "Имя репозитория."),
-                            "run_id" to ParameterPropertyDto(type = "INTEGER", description = "Числовой идентификатор запуска сборки (run_id).")
+                            "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец."),
+                            "repo" to ParameterPropertyDto(type = "STRING", description = "Репозиторий."),
+                            "run_id" to ParameterPropertyDto(type = "INTEGER", description = "Идентификатор запуска.")
                         ),
                         required = listOf("owner", "repo", "run_id")
                     )
                 ),
                 FunctionDeclarationDto(
                     name = "github_get_ci_logs",
-                    description = "Скачивает лог компилятора упавшей задачи GitHub Actions с извлечением стектрейсов ошибок kotlinc / javac.",
+                    description = "Скачивает лог упавшей задачи Actions для извлечения ошибок компилятора.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
-                            "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец репозитория."),
-                            "repo" to ParameterPropertyDto(type = "STRING", description = "Имя репозитория."),
-                            "job_id" to ParameterPropertyDto(type = "INTEGER", description = "Идентификатор задачи сборщика (job_id).")
+                            "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец."),
+                            "repo" to ParameterPropertyDto(type = "STRING", description = "Репозиторий."),
+                            "job_id" to ParameterPropertyDto(type = "INTEGER", description = "Идентификатор задачи.")
                         ),
                         required = listOf("owner", "repo", "job_id")
                     )
                 ),
                 FunctionDeclarationDto(
                     name = "github_create_pull_request",
-                    description = "Открывает Pull Request из рабочей ветки в базовую с подробным описанием проделанной работы.",
+                    description = "Создает Pull Request из рабочей ветки в базовую.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
-                            "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец репозитория."),
-                            "repo" to ParameterPropertyDto(type = "STRING", description = "Имя репозитория."),
-                            "title" to ParameterPropertyDto(type = "STRING", description = "Заголовок Pull Request."),
-                            "body" to ParameterPropertyDto(type = "STRING", description = "Markdown-описание изменений и архитектуры."),
-                            "head_branch" to ParameterPropertyDto(type = "STRING", description = "Имя ветки с изменениями."),
-                            "base_branch" to ParameterPropertyDto(type = "STRING", description = "Базовая ветка для слияния (по умолчанию main).")
+                            "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец."),
+                            "repo" to ParameterPropertyDto(type = "STRING", description = "Репозиторий."),
+                            "title" to ParameterPropertyDto(type = "STRING", description = "Заголовок PR."),
+                            "body" to ParameterPropertyDto(type = "STRING", description = "Описание PR."),
+                            "head_branch" to ParameterPropertyDto(type = "STRING", description = "Рабочая ветка."),
+                            "base_branch" to ParameterPropertyDto(type = "STRING", description = "Базовая ветка (по умолчанию main).")
                         ),
                         required = listOf("owner", "repo", "title", "body", "head_branch")
                     )
                 ),
                 FunctionDeclarationDto(
                     name = "github_merge_pull_request",
-                    description = "Выполняет автоматическое слияние Pull Request после успешной компиляции и прохождения всех проверок.",
+                    description = "Выполняет слияние Pull Request.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
-                            "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец репозитория."),
-                            "repo" to ParameterPropertyDto(type = "STRING", description = "Имя репозитория."),
-                            "pull_number" to ParameterPropertyDto(type = "INTEGER", description = "Номер Pull Request."),
-                            "commit_title" to ParameterPropertyDto(type = "STRING", description = "Заголовок коммита слияния (опционально)."),
-                            "merge_method" to ParameterPropertyDto(
-                                type = "STRING",
-                                description = "Метод слияния: squash, merge или rebase (по умолчанию squash).",
-                                enum = listOf("squash", "merge", "rebase")
-                            )
+                            "owner" to ParameterPropertyDto(type = "STRING", description = "Владелец."),
+                            "repo" to ParameterPropertyDto(type = "STRING", description = "Репозиторий."),
+                            "pull_number" to ParameterPropertyDto(type = "INTEGER", description = "Номер PR."),
+                            "commit_title" to ParameterPropertyDto(type = "STRING", description = "Заголовок коммита."),
+                            "merge_method" to ParameterPropertyDto(type = "STRING", description = "squash, merge или rebase.")
                         ),
                         required = listOf("owner", "repo", "pull_number")
                     )
                 ),
                 FunctionDeclarationDto(
                     name = "github_execute_raw_rest",
-                    description = "Универсальный шлюз: выполняет произвольный запрос к любому эндпоинту GitHub REST API.",
+                    description = "Произвольный REST-запрос к GitHub API.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
-                            "method" to ParameterPropertyDto(type = "STRING", description = "HTTP-метод (GET, POST, PUT, PATCH, DELETE).", enum = listOf("GET", "POST", "PUT", "PATCH", "DELETE")),
-                            "endpoint_path" to ParameterPropertyDto(type = "STRING", description = "Путь эндпоинта (например, repos/owner/repo/releases)."),
-                            "query_params" to ParameterPropertyDto(type = "OBJECT", description = "Query параметры в формате ключ-значение.", properties = emptyMap()),
-                            "json_body" to ParameterPropertyDto(type = "STRING", description = "Тело запроса в виде валидной JSON-строки (опционально).")
+                            "method" to ParameterPropertyDto(type = "STRING", description = "GET, POST, PUT, PATCH, DELETE"),
+                            "endpoint_path" to ParameterPropertyDto(type = "STRING", description = "Путь эндпоинта."),
+                            "query_params" to ParameterPropertyDto(type = "OBJECT", description = "Параметры.", properties = emptyMap()),
+                            "json_body" to ParameterPropertyDto(type = "STRING", description = "JSON тело.")
                         ),
                         required = listOf("method", "endpoint_path")
                     )
                 ),
                 FunctionDeclarationDto(
                     name = "github_execute_graphql",
-                    description = "Универсальный GraphQL шлюз к GitHub API v4 для выполнения сложных графовых запросов.",
+                    description = "Выполняет GraphQL запрос к GitHub API v4.",
                     parameters = FunctionParametersSchemaDto(
                         properties = mapOf(
-                            "query" to ParameterPropertyDto(type = "STRING", description = "Тело GraphQL-запроса."),
-                            "variables" to ParameterPropertyDto(type = "OBJECT", description = "Переменные запроса в формате ключ-значение.", properties = emptyMap())
+                            "query" to ParameterPropertyDto(type = "STRING", description = "GraphQL запрос."),
+                            "variables" to ParameterPropertyDto(type = "OBJECT", description = "Переменные.", properties = emptyMap())
                         ),
                         required = listOf("query")
                     )
@@ -331,7 +307,7 @@ class OrchestratorToolBridge(
         thoughtSignature: String?
     ): FunctionResponsePartDto = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
-        AppLogger.i(AppLogger.TAG_ENGINE, "ToolBridge: Запуск вызова инструмента '${call.name}' (id=${call.id})...")
+        AppLogger.i(AppLogger.TAG_ENGINE, "ToolBridge: Запуск '${call.name}' (id=${call.id})...")
 
         val resultPayload: JsonObject = try {
             withTimeout(TOOL_EXECUTION_TIMEOUT_MS) {
@@ -423,15 +399,14 @@ class OrchestratorToolBridge(
 
             "workspace_batch_write" -> {
                 val filesObj = args["files"]?.jsonObject
-                    ?: throw IllegalArgumentException("Обязательный параметр 'files' отсутствует или не является JSON-объектом.")
+                    ?: throw IllegalArgumentException("Обязательный параметр 'files' отсутствует.")
 
                 val writtenPaths = mutableListOf<String>()
                 filesObj.forEach { (path, contentElem) ->
-                    val content = contentElem.jsonPrimitive.content
-                    val cleanContent = content.trim()
+                    val clean = contentElem.jsonPrimitive.content.trim()
                         .replace(Regex("^```[a-zA-Z0-9_-]*\\r?\\n"), "")
                         .replace(Regex("\\r?\\n```$"), "")
-                    workspaceManager.writeTextFileAtomic(path, cleanContent)
+                    workspaceManager.writeTextFileAtomic(path, clean)
                     writtenPaths.add(path)
                 }
 
@@ -441,7 +416,7 @@ class OrchestratorToolBridge(
                     putJsonArray("written_paths") {
                         writtenPaths.forEach { add(JsonPrimitive(it)) }
                     }
-                    put("message", "Пакет из ${writtenPaths.size} файлов успешно записан на диск за один шаг.")
+                    put("message", "Пакет из ${writtenPaths.size} файлов записан за 1 шаг.")
                 }
             }
 
@@ -451,7 +426,6 @@ class OrchestratorToolBridge(
                 buildJsonObject {
                     put("status", if (deleted) "success" else "not_found")
                     put("path", path)
-                    put("message", if (deleted) "Файл удален" else "Файл не существовал в рабочей области")
                 }
             }
 
@@ -496,7 +470,7 @@ class OrchestratorToolBridge(
                 if (delta.modifiedFiles.isEmpty() && delta.deletedFiles.isEmpty()) {
                     return buildJsonObject {
                         put("status", "nothing_to_commit")
-                        put("message", "На диске нет измененных или удаленных файлов для отправки в репозиторий.")
+                        put("message", "На диске нет изменений для фиксации.")
                     }
                 }
 
@@ -521,7 +495,15 @@ class OrchestratorToolBridge(
                 }
             }
 
+            // МГНОВЕННЫЙ FAIL-FAST (0 МС) ЕСЛИ В РЕПОЗИТОРИИ НЕТ WORKFLOWS:
             "github_trigger_ci_build" -> {
+                if (!workspaceManager.hasConfiguredCiWorkflows()) {
+                    return buildJsonObject {
+                        put("status", "skipped")
+                        put("message", "В репозитории нет каталога .github/workflows/*.yml. Запуск CI не требуется.")
+                    }
+                }
+
                 val owner = args.getRequiredString("owner")
                 val repo = args.getRequiredString("repo")
                 val workflowId = args.getRequiredString("workflow_id")
@@ -532,11 +514,18 @@ class OrchestratorToolBridge(
                     put("status", if (dispatched) "dispatched" else "failed")
                     put("workflow", workflowId)
                     put("ref", ref)
-                    put("message", "Сборка поставлена в очередь выполнения GitHub Actions.")
                 }
             }
 
             "github_get_ci_status" -> {
+                if (!workspaceManager.hasConfiguredCiWorkflows()) {
+                    return buildJsonObject {
+                        put("status", "skipped")
+                        put("conclusion", "success")
+                        put("message", "В репозитории нет воркфлоу CI. Проверка пропущена (локальный коммит валиден).")
+                    }
+                }
+
                 val owner = args.getRequiredString("owner")
                 val repo = args.getRequiredString("repo")
                 val runId = args.getRequiredLong("run_id")
@@ -546,7 +535,7 @@ class OrchestratorToolBridge(
                     repo = repo,
                     runId = runId,
                     pollIntervalMs = 5000L,
-                    timeoutMs = 300_000L
+                    timeoutMs = 60_000L // Сокращено до 60 секунд
                 )
 
                 buildJsonObject {
@@ -600,7 +589,6 @@ class OrchestratorToolBridge(
                     put("status", if (mergeRes.merged) "merged" else "failed")
                     put("merged", mergeRes.merged)
                     put("sha", mergeRes.sha ?: "")
-                    put("message", mergeRes.message)
                 }
             }
 
@@ -628,20 +616,18 @@ class OrchestratorToolBridge(
                 }
             }
 
-            else -> {
-                throw IllegalArgumentException("Неизвестный инструмент: '$name'. Проверьте декларации схем.")
-            }
+            else -> throw IllegalArgumentException("Неизвестный инструмент: '$name'.")
         }
     }
 
     private fun buildErrorPayload(toolName: String, e: Exception): JsonObject {
         val hint = when (e) {
-            is SecurityException -> "Ошибка доступа: путь вышел за пределы локальной папки. Используйте относительные пути без '../'."
-            is NoSuchFileException -> "Файл не найден. Сначала вызовите 'workspace_get_tree', чтобы увидеть точные пути проекта."
-            is GitHubRateLimitException -> "Превышен лимит запросов к GitHub. Повторите попытку через ${e.retryAfterSeconds} секунд."
-            is GitHubApiException -> "Сбой GitHub API (${e.statusCode}): ${e.githubMessage}. Проверьте параметры и права токена."
+            is SecurityException -> "Ошибка песочницы: используйте относительные пути без '../'."
+            is NoSuchFileException -> "Файл не найден на диске."
+            is GitHubRateLimitException -> "Лимит запросов GitHub. Ожидание ${e.retryAfterSeconds} с."
+            is GitHubApiException -> "Сбой GitHub API (${e.statusCode}): ${e.githubMessage}."
             is IllegalArgumentException -> "Некорректные аргументы инструмента: ${e.message}."
-            else -> "Внутренний сбой выполнения инструмента: ${e.localizedMessage}."
+            else -> "Сбой инструмента: ${e.localizedMessage}."
         }
 
         return buildJsonObject {
@@ -655,12 +641,12 @@ class OrchestratorToolBridge(
 
     private fun safeTruncate(text: String, maxChars: Int = MAX_OUTPUT_CHARS): String {
         if (text.length <= maxChars) return text
-        return text.take(maxChars) + "\n\n... [TRUNCATED: Вывод превысил лимит $maxChars символов для защиты контекста модели]."
+        return text.take(maxChars) + "\n\n... [TRUNCATED]."
     }
 
     private fun JsonObject.getRequiredString(key: String): String {
         return this[key]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-            ?: throw IllegalArgumentException("Обязательный строковый аргумент '$key' не передан или пуст.")
+            ?: throw IllegalArgumentException("Обязательный строковый аргумент '$key' не передан.")
     }
 
     private fun JsonObject.getRequiredInt(key: String): Int {
@@ -670,6 +656,6 @@ class OrchestratorToolBridge(
 
     private fun JsonObject.getRequiredLong(key: String): Long {
         return this[key]?.jsonPrimitive?.longOrNull
-            ?: throw IllegalArgumentException("Обязательный длинный целочисленный аргумент '$key' отсутствует.")
+            ?: throw IllegalArgumentException("Обязательный аргумент '$key' отсутствует.")
     }
 }
