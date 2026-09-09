@@ -36,6 +36,10 @@ import kotlin.random.Random
 enum class OrchestratorPhase {
     IDLE,
     INITIALIZING_WORKSPACE,
+    RECONNAISSANCE_T0,        // Этап 1: Срез топологии без чтения файлов (LOW)
+    FEASIBILITY_GATE_STAGE2,  // Этап 2: Семантический шлюз Истина / Ложь (HIGH)
+    PHYSICAL_DEPLOY_STAGE3,   // Этап 3: Деплой архива на UFS 4.0, НЕ ЧИТАТЬ! (LOW)
+    CODEBASE_AUDIT_STAGE4,    // Этап 4: Залповый беспристрастный аудит файлов (HIGH)
     REASONING_AND_PLANNING,
     EXECUTING_TOOL,
     AWAITING_BARRIER,
@@ -67,6 +71,7 @@ data class OrchestratorState(
     val totalThoughtsTokens: Long = 0L,
     val totalCachedTokens: Long = 0L,
     val statusMessage: String = "Готов к запуску",
+    val deepInvestigationLog: String = "",
     val errorMessage: String? = null
 )
 
@@ -75,6 +80,7 @@ sealed interface OrchestratorEvent {
     data class StepChanged(val currentStep: Int, val maxSteps: Int) : OrchestratorEvent
     data class TokensUpdated(val totalTokens: Long, val promptTokens: Long, val candidateTokens: Long) : OrchestratorEvent
     data class ThinkingDelta(val delta: String) : OrchestratorEvent
+    data class DeepLogAppended(val chunk: String) : OrchestratorEvent
     data class ToolExecuting(val name: String, val callId: String?) : OrchestratorEvent
     data class ToolFinished(val name: String, val durationMs: Long, val isSuccess: Boolean) : OrchestratorEvent
     data class BarrierProgress(val total: Int, val remaining: Int, val isGreenLight: Boolean) : OrchestratorEvent
@@ -82,13 +88,21 @@ sealed interface OrchestratorEvent {
     data class TaskFinished(val success: Boolean, val message: String, val commitSha: String?) : OrchestratorEvent
 }
 
+data class Stage2FeasibilityResult(
+    val isFeasible: Boolean,
+    val rawVerdict: String,
+    val explanation: String,
+    val logFormattedEntry: String
+)
+
 data class AutonomousTaskResult(
     val isSuccess: Boolean,
     val finalMessage: String,
     val commitSha: String?,
     val totalSteps: Int,
     val repairRoundsUsed: Int,
-    val totalTokensBurned: Long
+    val totalTokensBurned: Long,
+    val deepLogContent: String
 )
 
 @Serializable
@@ -214,20 +228,7 @@ class AutonomousOrchestrator(
     ): AutonomousTaskResult = withContext(Dispatchers.IO) {
         loopMutex.withLock {
             val sessionId = existingWorkspaceManager?.sessionId ?: UUID.randomUUID().toString()
-            AppLogger.i(AppLogger.TAG_APP, "AutonomousOrchestrator: Старт миссии [session=$sessionId, repo=$owner/$repo, branch=$branch]")
-
             acquireWakeLock()
-
-            _state.update {
-                OrchestratorState(
-                    phase = OrchestratorPhase.INITIALIZING_WORKSPACE,
-                    maxSteps = maxSteps,
-                    maxRepairRounds = maxRepairRounds,
-                    statusMessage = "Инициализация локальной рабочей области на UFS 4.0..."
-                )
-            }
-            _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.INITIALIZING_WORKSPACE, "Инициализация рабочей области"))
-            _events.emit(OrchestratorEvent.StepChanged(0, maxSteps))
 
             val workspaceManager = existingWorkspaceManager ?: LocalWorkspaceManager(sessionId, context)
             val gitHubEngine = existingGitHubEngine ?: GitHubEngine(tokenProvider = gitHubTokenProvider, httpClient = httpClient, shouldCloseHttpClient = false)
@@ -238,35 +239,115 @@ class AutonomousOrchestrator(
             var lastCommittedSha: String? = null
             var repairRound = 0
             var currentStep = 0
-            var nextThinkingLevel = "LOW" // Старт с LOW для экономии токенов
+            var nextThinkingLevel = "LOW"
 
             val recentToolCalls = ArrayDeque<String>(6)
 
             try {
-                val baselineFilesCount = if (existingWorkspaceManager == null) {
-                    _state.update { it.copy(statusMessage = "Скачивание архива репозитория из GitHub...") }
-                    gitHubEngine.downloadAndUnpackZipball(owner, repo, branch, workspaceManager.workspaceRoot)
-                    _state.update { it.copy(statusMessage = "Снятие контрольного снимка файлов (SHA-256)...") }
-                    workspaceManager.captureBaseline()
-                } else {
-                    workspaceManager.captureBaseline()
+                // ====================================================================
+                // ЭТАП 1: $T_0$ РЕКОГНОСЦИРОВКА (РЕЖИМ LOW) — СТРУКТУРА БЕЗ ЧТЕНИЯ ТЕЛ
+                // ====================================================================
+                _state.update {
+                    it.copy(
+                        phase = OrchestratorPhase.RECONNAISSANCE_T0,
+                        statusMessage = "Этап 1: Рекогносцировка T0 (структурный рентген в LOW)..."
+                    )
                 }
-                AppLogger.i(AppLogger.TAG_APP, "AutonomousOrchestrator: Базовый снимок ($baselineFilesCount файлов)")
+                _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.RECONNAISSANCE_T0, "Этап 1: Рекогносцировка T0"))
 
+                val treeDto = workspaceManager.getProjectTree(maxDepth = 6)
+                val t0PassportText = performT0Reconnaissance(owner, repo, branch, userObjective, treeDto)
+                appendDeepLog(t0PassportText)
+
+                // ====================================================================
+                // ЭТАП 2: ШЛЮЗ ВАЛИДАЦИИ «ИСТИНА / ЛОЖЬ» (РЕЖИМ HIGH)
+                // ====================================================================
+                _state.update {
+                    it.copy(
+                        phase = OrchestratorPhase.FEASIBILITY_GATE_STAGE2,
+                        statusMessage = "Этап 2: Валидация предусловий [ИСТИНА / ЛОЖЬ] (в HIGH)..."
+                    )
+                }
+                _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.FEASIBILITY_GATE_STAGE2, "Этап 2: Проверка Истина/Ложь"))
+
+                val stage2Result = performStage2FeasibilityCheck(userObjective, t0PassportText)
+                appendDeepLog(stage2Result.logFormattedEntry)
+
+                // МГНОВЕННЫЙ FAIL-FAST ПРИ ВЕРДИКТЕ [ЛОЖЬ]:
+                if (!stage2Result.isFeasible) {
+                    val rejectMessage = "Миссия остановлена на Этапе 2: задача несовместима с репозиторием (ВЕРДИКТ: ЛОЖЬ).\n${stage2Result.explanation}"
+                    _state.update {
+                        it.copy(phase = OrchestratorPhase.FAILED, statusMessage = "Отказ: задача противоречит реальности (ЛОЖЬ)", errorMessage = stage2Result.explanation)
+                    }
+                    _events.emit(OrchestratorEvent.TaskFinished(false, rejectMessage, null))
+
+                    return@withLock AutonomousTaskResult(
+                        isSuccess = false,
+                        finalMessage = rejectMessage,
+                        commitSha = null,
+                        totalSteps = 1,
+                        repairRoundsUsed = 0,
+                        totalTokensBurned = _state.value.totalPromptTokens + _state.value.totalCandidateTokens + _state.value.totalThoughtsTokens,
+                        deepLogContent = _state.value.deepInvestigationLog
+                    )
+                }
+
+                // ====================================================================
+                // ЭТАП 3: ФИЗИЧЕСКИЙ ДЕПЛОЙ НА UFS 4.0 (РЕЖИМ LOW) — ЖЕЛЕЗНО НЕ ЧИТАТЬ!
+                // ====================================================================
+                _state.update {
+                    it.copy(
+                        phase = OrchestratorPhase.PHYSICAL_DEPLOY_STAGE3,
+                        statusMessage = "Этап 3: Деплой архива репозитория на UFS 4.0 (LOW, без чтения)..."
+                    )
+                }
+                _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.PHYSICAL_DEPLOY_STAGE3, "Этап 3: Физический деплой"))
+
+                if (existingWorkspaceManager == null) {
+                    gitHubEngine.downloadAndUnpackZipball(owner, repo, branch, workspaceManager.workspaceRoot)
+                }
+                val baselineCount = workspaceManager.captureBaseline()
+
+                appendDeepLog(
+                    "=== [ЭТАП 3: ФИЗИЧЕСКИЙ ДЕПЛОЙ НА UFS 4.0] ===\n" +
+                    "• Архив репозитория успешно выкачан и распакован в изолированную песочницу.\n" +
+                    "• Контрольный снимок SHA-256 зафиксирован ($baselineCount файлов).\n" +
+                    "• Правило соблюдено: файлы физически на диске, но НЕ ЧИТАЮТСЯ.\n" +
+                    "==============================================="
+                )
+
+                // ====================================================================
+                // ЭТАП 4: ТОТАЛЬНЫЙ БЕСПРИСТРАСТНЫЙ АУДИТ КОДОВОЙ БАЗЫ (РЕЖИМ HIGH)
+                // ====================================================================
+                _state.update {
+                    it.copy(
+                        phase = OrchestratorPhase.CODEBASE_AUDIT_STAGE4,
+                        statusMessage = "Этап 4: Залповый глубокий аудит всей кодовой базы (HIGH, tools=null)..."
+                    )
+                }
+                _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.CODEBASE_AUDIT_STAGE4, "Этап 4: Тотальный аудит"))
+
+                val allFilesBundle = workspaceManager.collectAllTextFilesForAudit()
+                val auditReportText = performStage4CodebaseAudit(owner, repo, branch, allFilesBundle)
+                appendDeepLog(auditReportText)
+
+                // ====================================================================
+                // ПЕРЕХОД К ПЛАНИРОВАНИЮ И РЕАЛИЗАЦИИ
+                // ====================================================================
                 val systemPrompt = buildSystemInstruction(owner, repo, branch)
                 val conversationHistory = mutableListOf<AgentContentDto>()
 
                 conversationHistory.add(
                     AgentContentDto(
                         role = "user",
-                        parts = listOf(AgentPartDto(text = buildInitialUserPrompt(userObjective, baselineFilesCount)))
+                        parts = listOf(AgentPartDto(text = buildInitialUserPrompt(userObjective, baselineCount, t0PassportText, stage2Result, auditReportText)))
                     )
                 )
 
                 _state.update {
                     it.copy(
                         phase = OrchestratorPhase.REASONING_AND_PLANNING,
-                        statusMessage = "Формирование плана выполнения..."
+                        statusMessage = "Кодовая база изучена. Планирование реализации..."
                     )
                 }
 
@@ -286,10 +367,13 @@ class AutonomousOrchestrator(
                     val textContent = modelTurn.parts.filter { it.thought != true }.mapNotNull { it.text }.joinToString("\n").trim()
                     val thoughtSig = modelTurn.parts.firstOrNull { it.thoughtSignature != null }?.thoughtSignature
 
+                    if (textContent.isNotBlank()) {
+                        appendDeepLog("Шаг $currentStep (Вывод):\n$textContent")
+                    }
+
                     conversationHistory.add(modelTurn)
 
                     if (functionCalls.isEmpty()) {
-                        AppLogger.i(AppLogger.TAG_APP, "AutonomousOrchestrator: Действия завершены.")
                         finalMessage = textContent.ifBlank { "Задача успешно выполнена." }
                         isTaskSucceeded = true
                         break
@@ -311,7 +395,7 @@ class AutonomousOrchestrator(
                             it.copy(
                                 phase = OrchestratorPhase.EXECUTING_TOOL,
                                 activeToolName = call.name,
-                                statusMessage = "Выполнение инструмента: ${call.name}..."
+                                statusMessage = "Инструмент: ${call.name}..."
                             )
                         }
                         _events.emit(OrchestratorEvent.ToolExecuting(call.name, call.id))
@@ -321,11 +405,10 @@ class AutonomousOrchestrator(
                         if (recentToolCalls.size > 5) recentToolCalls.removeFirst()
 
                         if (recentToolCalls.size >= 3 && recentToolCalls.takeLast(3).all { it == callFingerprint }) {
-                            AppLogger.w(AppLogger.TAG_APP, "AutonomousOrchestrator: Петля зацикливания '${call.name}'!")
                             conversationHistory.add(
                                 AgentContentDto(
                                     role = "user",
-                                    parts = listOf(AgentPartDto(text = "ВНИМАНИЕ: Вы вызываете '${call.name}' повторно. Переходите к следующему шагу или завершите задачу."))
+                                    parts = listOf(AgentPartDto(text = "ВНИМАНИЕ: Повторный вызов '${call.name}'. Переходите к коммиту или завершению."))
                                 )
                             )
                         }
@@ -338,7 +421,6 @@ class AutonomousOrchestrator(
                                 lastCommittedSha = pushOutput["commit_sha"]?.jsonPrimitive?.contentOrNull
                                 commitSucceededOnThisTurn = true
                                 _state.update { it.copy(lastCommitSha = lastCommittedSha) }
-                                AppLogger.i(AppLogger.TAG_APP, "AutonomousOrchestrator: Коммит: $lastCommittedSha")
                             }
                         }
 
@@ -347,13 +429,6 @@ class AutonomousOrchestrator(
                         )
 
                         toolResponseParts.add(AgentPartDto(functionResponse = sanitizedResponse))
-
-                        _state.update {
-                            it.copy(
-                                completedToolsCount = it.completedToolsCount + 1,
-                                activeToolName = null
-                            )
-                        }
                         _events.emit(OrchestratorEvent.ToolFinished(call.name, 0L, true))
                     }
 
@@ -364,22 +439,15 @@ class AutonomousOrchestrator(
                         )
                     )
 
-                    // АВТО-СТОП ЦИКЛА СРАЗУ ПОСЛЕ УСПЕШНОГО КОММИТА (если нет воркфлоу):
+                    // АВТО-СТОП ЦИКЛА ПОСЛЕ УСПЕШНОГО КОММИТА (если нет воркфлоу):
                     if (commitSucceededOnThisTurn && !workspaceManager.hasConfiguredCiWorkflows()) {
-                        AppLogger.i(AppLogger.TAG_APP, "AutonomousOrchestrator: Коммит успешно зафиксирован, CI отсутствует. Авто-завершение миссии!")
-                        finalMessage = "Коммит успешно зафиксирован: $lastCommittedSha. Задача выполнена за $currentStep шага(ов)."
+                        finalMessage = "Коммит зафиксирован: $lastCommittedSha. Задача выполнена за $currentStep шагов."
                         isTaskSucceeded = true
+                        appendDeepLog("=== [УСПЕХ] ===\n$finalMessage")
                         break
                     }
 
                     compactConversationHistory(conversationHistory)
-
-                    _state.update {
-                        it.copy(
-                            phase = OrchestratorPhase.REASONING_AND_PLANNING,
-                            statusMessage = "Анализ результатов инструментов..."
-                        )
-                    }
                 }
 
                 if (currentStep >= maxSteps && !isTaskSucceeded) {
@@ -387,31 +455,17 @@ class AutonomousOrchestrator(
                 }
 
             } catch (e: kotlinx.coroutines.CancellationException) {
-                AppLogger.w(AppLogger.TAG_APP, "AutonomousOrchestrator: Отменено пользователем.")
-                finalMessage = "Задача принудительно остановлена пользователем."
+                finalMessage = "Задача отменена пользователем."
                 _state.update { it.copy(phase = OrchestratorPhase.CANCELLED, statusMessage = finalMessage) }
             } catch (e: Exception) {
-                AppLogger.e(AppLogger.TAG_APP, "AutonomousOrchestrator: Сбой: ${e.message}", e)
-                finalMessage = "Критическая ошибка: ${e.localizedMessage}"
+                finalMessage = "Ошибка: ${e.localizedMessage}"
                 _state.update { it.copy(phase = OrchestratorPhase.FAILED, errorMessage = finalMessage) }
             } finally {
                 withContext(NonCancellable) {
                     releaseWakeLock()
-
-                    val finalPhase = when {
-                        isTaskSucceeded -> OrchestratorPhase.COMPLETED
-                        _state.value.phase == OrchestratorPhase.CANCELLED -> OrchestratorPhase.CANCELLED
-                        else -> OrchestratorPhase.FAILED
-                    }
-
-                    _state.update {
-                        it.copy(
-                            phase = finalPhase,
-                            statusMessage = if (isTaskSucceeded) finalMessage.ifBlank { "Миссия успешно завершена!" } else finalMessage
-                        )
-                    }
+                    val finalPhase = if (isTaskSucceeded) OrchestratorPhase.COMPLETED else OrchestratorPhase.FAILED
+                    _state.update { it.copy(phase = finalPhase, statusMessage = finalMessage) }
                     _events.emit(OrchestratorEvent.TaskFinished(isTaskSucceeded, finalMessage, lastCommittedSha))
-
                     if (shouldCloseHttpClient && existingGitHubEngine == null) {
                         gitHubEngine.close()
                     }
@@ -424,9 +478,162 @@ class AutonomousOrchestrator(
                 commitSha = lastCommittedSha,
                 totalSteps = currentStep,
                 repairRoundsUsed = repairRound,
-                totalTokensBurned = _state.value.totalPromptTokens + _state.value.totalCandidateTokens + _state.value.totalThoughtsTokens
+                totalTokensBurned = _state.value.totalPromptTokens + _state.value.totalCandidateTokens + _state.value.totalThoughtsTokens,
+                deepLogContent = _state.value.deepInvestigationLog
             )
         }
+    }
+
+    // ====================================================================
+    // ЭТАП 1: РЕКОГНОСЦИРОВКА T0 (РЕЖИМ LOW) — ТОПОЛОГИЯ БЕЗ ЧТЕНИЯ ТЕЛ
+    // ====================================================================
+    private suspend fun performT0Reconnaissance(
+        owner: String,
+        repo: String,
+        branch: String,
+        userObjective: String,
+        tree: com.conveyorg.data.WorkspaceTreeDto
+    ): String {
+        val treeListing = buildString {
+            appendLine("Файлов: ${tree.totalFiles}, Директорий: ${tree.totalDirectories}")
+            tree.nodes.take(200).forEach { node ->
+                appendLine("- ${if (node.isDirectory) "[DIR]" else "[FILE]"} ${node.path} (${node.sizeBytes} байт)")
+            }
+        }
+
+        val prompt = "ЭТАП T0: СНЯТИЕ СЛЕПКА ФИЗИЧЕСКОЙ РЕАЛЬНОСТИ И СТРУКТУРНЫЙ ПАСПОРТ РЕПОЗИТОРИЯ.\n" +
+                "Репозиторий: '$owner/$repo' (ветка: '$branch').\n\n" +
+                "ЗАДАЧА КЛИЕНТА:\n$userObjective\n\n" +
+                "ТОПОЛОГИЯ ДЕРЕВА (файлы НЕ открывать, известны только пути и размеры):\n$treeListing\n\n" +
+                "ЗАДАЧА МОДЕЛИ:\n" +
+                "Не открывая файлы, сформируй краткий структурный паспорт T0:\n" +
+                "1. Стек и состояние проекта (Greenfield/пустой, Kotlin/Android, Python, JS/Node, Rust и т.д.).\n" +
+                "2. Наличие сборочных систем (Gradle, Maven, NPM, Cargo).\n" +
+                "3. Наличие CI/CD инфраструктуры (.github/workflows).\n" +
+                "4. Физическая база файлов."
+
+        val turn = executeSingleGeminiTurn(
+            systemPrompt = "Ты — экспертный аналитик архитектуры. Твоя задача — холодный, точный анализ структуры проекта без чтения файлов.",
+            history = listOf(AgentContentDto(role = "user", parts = listOf(AgentPartDto(text = prompt)))),
+            toolDeclarations = GeminiToolDto(functionDeclarations = emptyList()),
+            thinkingLevel = "LOW"
+        )
+
+        val passport = turn.parts.filter { it.thought != true }.mapNotNull { it.text }.joinToString("\n").trim()
+        return "=== [T0: СТРУКТУРНЫЙ ПАСПОРТ РЕПОЗИТОРИЯ] ===\n" +
+               (passport.ifBlank { "Паспорт сформирован автоматически по дереву файлов." }) +
+               "\n============================================="
+    }
+
+    // ====================================================================
+    // ЭТАП 2: ШЛЮЗ ВАЛИДАЦИИ «ИСТИНА / ЛОЖЬ» (РЕЖИМ HIGH)
+    // ====================================================================
+    private suspend fun performStage2FeasibilityCheck(
+        userObjective: String,
+        t0Passport: String
+    ): Stage2FeasibilityResult {
+        val prompt = buildString {
+            appendLine("ЭТАП 2: СЕМАНТИЧЕСКИЙ ШЛЮЗ ВАЛИДАЦИИ «ИСТИНА / ЛОЖЬ».")
+            appendLine()
+            appendLine("1. СТРУКТУРНЫЙ ПАСПОРТ РЕПОЗИТОРИЯ T0:")
+            appendLine(t0Passport)
+            appendLine()
+            appendLine("2. ЗАДАЧА КЛИЕНТА:")
+            appendLine(userObjective)
+            appendLine()
+            appendLine("ПРАВИЛО ОЦЕНКИ:")
+            appendLine("Ты ведущий инженер-архитектор. Опираясь на паспорт T0 и задачу клиента, определи:")
+            appendLine("Сопоставима ли задача клиента с текущим состоянием репозитория (ИСТИНА) или она физически/логически противоречит реальности (ЛОЖЬ)?")
+            appendLine()
+            appendLine("Примеры логики (Few-Shot):")
+            appendLine("• Пример 1: Репозиторий пуст -> Задача: 'Скомпилируй и исправь ошибки' -> ЛОЖЬ (нельзя скомпилировать то, чего физически нет).")
+            appendLine("• Пример 2: Репозиторий пуст -> Задача: 'Создай приложение с нуля' -> ИСТИНА (создание совпадает с чистым репозиторием).")
+            appendLine("• Пример 3: В репозитории чистый Python -> Задача: 'Допиши Android Compose экран' без запроса миграции -> ЛОЖЬ (несовместимый стек).")
+            appendLine("• Пример 4: В репозитории уже есть проект -> Задача: 'Модернизируй и добавь функцию X' -> ИСТИНА (логичное развитие существующего кода).")
+            appendLine()
+            appendLine("ФОРМАТ ОТВЕТА:")
+            appendLine("На первой строке выведи строго вердикт:")
+            appendLine("ВЕРДИКТ: [ИСТИНА]")
+            appendLine("или")
+            appendLine("ВЕРДИКТ: [ЛОЖЬ]")
+            appendLine()
+            appendLine("Со второй строки дай краткое обоснование вердикта в 1-2 предложения для журнала сессии.")
+        }
+
+        val turn = executeSingleGeminiTurn(
+            systemPrompt = "Ты — строгий технический архитектор. Оценивай выполнимость предусловий задачи с предельной строгостью.",
+            history = listOf(AgentContentDto(role = "user", parts = listOf(AgentPartDto(text = prompt)))),
+            toolDeclarations = GeminiToolDto(functionDeclarations = emptyList()),
+            thinkingLevel = "HIGH"
+        )
+
+        val rawResponse = turn.parts.filter { it.thought != true }.mapNotNull { it.text }.joinToString("\n").trim()
+        val isExplicitFalse = rawResponse.contains("[ЛОЖЬ]", ignoreCase = true) || rawResponse.contains("ВЕРДИКТ: ЛОЖЬ", ignoreCase = true)
+        val isExplicitTrue = rawResponse.contains("[ИСТИНА]", ignoreCase = true) || rawResponse.contains("ВЕРДИКТ: ИСТИНА", ignoreCase = true)
+
+        val isFeasible = if (isExplicitFalse && !isExplicitTrue) false else if (isExplicitTrue) true else !rawResponse.contains("ложь", ignoreCase = true)
+        val explanation = rawResponse.lines().drop(1).joinToString("\n").trim().ifBlank { rawResponse }
+        val verdictLabel = if (isFeasible) "[ИСТИНА]" else "[ЛОЖЬ]"
+
+        val logEntry = buildString {
+            appendLine("=== [ЭТАП 2: ВАЛИДАЦИЯ ПРЕДУСЛОВИЙ — $verdictLabel] ===")
+            appendLine("• Вердикт: $verdictLabel")
+            appendLine("• Обоснование: $explanation")
+            if (isFeasible) appendLine("• ШЛЮЗ ОТКРЫТ: Предусловия подтверждены. Переход к деплою и аудиту.")
+            else appendLine("• СТОП МИССИИ: Задача отвергнута из-за противоречия реальности.")
+            append("=====================================================")
+        }
+
+        return Stage2FeasibilityResult(isFeasible, verdictLabel, explanation, logEntry)
+    }
+
+    // ====================================================================
+    // ЭТАП 4: ТОТАЛЬНЫЙ БЕСПРИСТРАСТНЫЙ АУДИТ КОДОВОЙ БАЗЫ (РЕЖИМ HIGH)
+    // ====================================================================
+    private suspend fun performStage4CodebaseAudit(
+        owner: String,
+        repo: String,
+        branch: String,
+        filesMap: Map<String, String>
+    ): String {
+        val codebasePayload = buildString {
+            if (filesMap.isEmpty()) {
+                appendLine("[В репозитории отсутствуют текстовые файлы исходного кода. Репозиторий чист.]")
+            } else {
+                appendLine("<repository_codebase>")
+                filesMap.forEach { (path, content) ->
+                    appendLine("<file path=\"$path\">")
+                    appendLine(content.take(15000))
+                    if (content.length > 15000) appendLine("... [Файл усечен для аудита]")
+                    appendLine("</file>")
+                }
+                appendLine("</repository_codebase>")
+            }
+        }
+
+        // ЖЕЛЕЗНЫЙ ЭТАЛОННЫЙ ПРОМПТ НАБЛЮДАТЕЛЯ:
+        val prompt = "Изучи полностью весь репозиторий, максимально глубоко, каждый файл от корня до конца, как только сможешь. " +
+                     "Выпиши подробные результаты в лог и запомни, и больше не предпринимай никаких действий и ничего не создавай.\n\n" +
+                     "Кодовая база репозитория '$owner/$repo' ($branch):\n\n" +
+                     codebasePayload
+
+        val turn = executeSingleGeminiTurn(
+            systemPrompt = "Ты — беспристрастный пассивный аналитик-наблюдатель. Твоя единственная цель — составить исчерпывающий технический отчет о том, что реально существует в кодовой базе. Ничего не создавай и не вызывай инструментов.",
+            history = listOf(AgentContentDto(role = "user", parts = listOf(AgentPartDto(text = prompt)))),
+            toolDeclarations = GeminiToolDto(functionDeclarations = emptyList()), // tools = null
+            thinkingLevel = "HIGH"
+        )
+
+        val auditText = turn.parts.filter { it.thought != true }.mapNotNull { it.text }.joinToString("\n").trim()
+        return "=== [ЭТАП 4: ТОТАЛЬНЫЙ АУДИТ КОДОВОЙ БАЗЫ] ===\n" +
+               (auditText.ifBlank { "Анализ кодовой базы завершен. Файлы зафиксированы в памяти." }) +
+               "\n=============================================="
+    }
+
+    private fun appendDeepLog(text: String) {
+        val timestamped = "\n\n$text"
+        _state.update { it.copy(deepInvestigationLog = it.deepInvestigationLog + timestamped) }
+        _events.tryEmit(OrchestratorEvent.DeepLogAppended(timestamped))
     }
 
     private suspend fun executeGeminiTurnWithRetry(
@@ -443,10 +650,7 @@ class AutonomousOrchestrator(
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 attempt++
                 if (attempt >= 4) throw e
-
-                val jitter = Random.nextLong(100, 600)
-                val backoff = min(MAX_BACKOFF_MS, (BASELINE_BACKOFF_MS * 2.0.pow(attempt.toDouble())).toLong()) + jitter
-                AppLogger.w(AppLogger.TAG_NET, "AutonomousOrchestrator: Повтор через ${backoff}мс...")
+                val backoff = min(MAX_BACKOFF_MS, (BASELINE_BACKOFF_MS * 2.0.pow(attempt.toDouble())).toLong()) + Random.nextLong(100, 600)
                 delay(backoff)
             }
         }
@@ -462,13 +666,12 @@ class AutonomousOrchestrator(
         val apiKey = geminiApiKeyProvider().trim()
         val endpoint = "$GEMINI_BASE_URL/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
 
-        // ОЧИСТКА МЫСЛЕЙ ИЗ ИСТОРИИ (ЗАЩИТА ОТ КВАДРАТИЧНОГО РОСТА ТОКЕНОВ):
         val sanitizedHistory = sanitizeHistoryForWire(history)
 
         val requestPayload = AgentWireRequest(
             systemInstruction = AgentSystemInstructionDto(listOf(AgentPartDto(text = systemPrompt))),
             contents = sanitizedHistory,
-            tools = listOf(toolDeclarations),
+            tools = if (toolDeclarations.functionDeclarations.isNullOrEmpty()) null else listOf(toolDeclarations),
             generationConfig = AgentGenerationConfigDto(
                 maxOutputTokens = 65536,
                 thinkingConfig = AgentThinkingConfigDto(thinkingLevel = thinkingLevel, includeThoughts = true)
@@ -476,12 +679,10 @@ class AutonomousOrchestrator(
         )
 
         val serializedBody = json.encodeToString(AgentWireRequest.serializer(), requestPayload)
-
         val responseParts = mutableListOf<AgentPartDto>()
         val accumulatedText = StringBuilder()
         val accumulatedThought = StringBuilder()
         var currentThoughtSignature: String? = null
-        var isThinkingActive = false
 
         httpClient.preparePost(endpoint) {
             header("x-goog-api-key", apiKey)
@@ -491,8 +692,7 @@ class AutonomousOrchestrator(
             setBody(serializedBody)
         }.execute { httpResponse ->
             if (!httpResponse.status.isSuccess()) {
-                val errText = httpResponse.bodyAsText()
-                throw GeminiApiException(httpResponse.status, "HTTP_${httpResponse.status.value}", errText)
+                throw GeminiApiException(httpResponse.status, "HTTP_${httpResponse.status.value}", httpResponse.bodyAsText())
             }
 
             val channel = httpResponse.bodyAsChannel()
@@ -510,7 +710,7 @@ class AutonomousOrchestrator(
                 }.getOrNull() ?: continue
 
                 chunk.usageMetadata?.let { usage ->
-                    val totalTokens = (usage.promptTokenCount + usage.candidatesTokenCount + usage.thoughtsTokenCount).toLong()
+                    val total = (usage.promptTokenCount + usage.candidatesTokenCount + usage.thoughtsTokenCount).toLong()
                     _state.update {
                         it.copy(
                             totalPromptTokens = it.totalPromptTokens + usage.promptTokenCount,
@@ -519,30 +719,23 @@ class AutonomousOrchestrator(
                             totalCachedTokens = it.totalCachedTokens + usage.cachedContentTokenCount
                         )
                     }
-                    _events.emit(OrchestratorEvent.TokensUpdated(totalTokens, usage.promptTokenCount.toLong(), usage.candidatesTokenCount.toLong()))
+                    _events.emit(OrchestratorEvent.TokensUpdated(total, usage.promptTokenCount.toLong(), usage.candidatesTokenCount.toLong()))
                 }
 
-                val candidate = chunk.candidates?.firstOrNull() ?: continue
-                candidate.content?.parts?.forEach { part ->
+                chunk.candidates?.firstOrNull()?.content?.parts?.forEach { part ->
                     part.thoughtSignature?.let { currentThoughtSignature = it }
 
                     if (part.thought == true) {
-                        isThinkingActive = true
                         part.text?.let { delta ->
                             accumulatedThought.append(delta)
                             _state.update { it.copy(currentThoughtText = it.currentThoughtText + delta) }
                             _events.emit(OrchestratorEvent.ThinkingDelta(delta))
                         }
                     } else if (part.functionCall != null) {
-                        isThinkingActive = false
                         responseParts.add(
-                            AgentPartDto(
-                                functionCall = part.functionCall,
-                                thoughtSignature = currentThoughtSignature
-                            )
+                            AgentPartDto(functionCall = part.functionCall, thoughtSignature = currentThoughtSignature)
                         )
                     } else if (!part.text.isNullOrEmpty()) {
-                        isThinkingActive = false
                         accumulatedText.append(part.text)
                     }
                 }
@@ -550,15 +743,10 @@ class AutonomousOrchestrator(
         }
 
         if (accumulatedThought.isNotEmpty()) {
-            responseParts.add(
-                0,
-                AgentPartDto(text = accumulatedThought.toString(), thought = true, thoughtSignature = currentThoughtSignature)
-            )
+            responseParts.add(0, AgentPartDto(text = accumulatedThought.toString(), thought = true, thoughtSignature = currentThoughtSignature))
         }
         if (accumulatedText.isNotEmpty()) {
-            responseParts.add(
-                AgentPartDto(text = accumulatedText.toString(), thoughtSignature = currentThoughtSignature)
-            )
+            responseParts.add(AgentPartDto(text = accumulatedText.toString(), thoughtSignature = currentThoughtSignature))
         }
 
         AgentContentDto(role = "model", parts = responseParts)
@@ -569,21 +757,11 @@ class AutonomousOrchestrator(
             if (turn.role != "model") {
                 turn
             } else {
-                val cleanedParts = turn.parts.mapNotNull { part ->
-                    if (part.thought == true) {
-                        null // Вырезаем текст мыслей из прошлых шагов
-                    } else {
-                        part
-                    }
-                }
-
-                if (cleanedParts.isEmpty()) {
-                    AgentContentDto(
-                        role = "model",
-                        parts = listOf(AgentPartDto(text = "[Шаг зафиксирован]"))
-                    )
+                val cleaned = turn.parts.mapNotNull { if (it.thought == true) null else it }
+                if (cleaned.isEmpty()) {
+                    AgentContentDto(role = "model", parts = listOf(AgentPartDto(text = "[Шаг зафиксирован]")))
                 } else {
-                    AgentContentDto(role = "model", parts = cleanedParts)
+                    AgentContentDto(role = "model", parts = cleaned)
                 }
             }
         }
@@ -598,25 +776,24 @@ class AutonomousOrchestrator(
 
     private fun compactConversationHistory(history: MutableList<AgentContentDto>) {
         if (history.size <= 6) return
-
         val keepRecentIndex = (history.size - 4).coerceAtLeast(1)
         for (i in 1 until keepRecentIndex) {
             val turn = history[i]
             if (turn.role == "tool") {
-                val compactedParts = turn.parts.map { part ->
+                val compacted = turn.parts.map { part ->
                     val resp = part.functionResponse ?: return@map part
                     if (resp.name in setOf("workspace_read_file", "workspace_read_diff", "workspace_get_tree", "workspace_search_symbol")) {
                         part.copy(
                             functionResponse = resp.copy(
                                 response = buildJsonObject {
                                     put("status", "compacted")
-                                    put("notice", "[Результат вызова '${resp.name}' сохранен].")
+                                    put("notice", "[Результат '${resp.name}' сохранен].")
                                 }
                             )
                         )
                     } else part
                 }
-                history[i] = turn.copy(parts = compactedParts)
+                history[i] = turn.copy(parts = compacted)
             }
         }
     }
@@ -630,36 +807,36 @@ class AutonomousOrchestrator(
     }
 
     private fun releaseWakeLock() {
-        wakeLock?.let {
-            if (it.isHeld) it.release()
-        }
+        wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
     }
 
     private fun buildSystemInstruction(owner: String, repo: String, branch: String): String {
         return "Ты — верховный автономный инженер-оркестратор ClientG на базе Gemini 3.8 Flash.\n" +
-               "Твоя задача — автономно реализовать программную задачу в репозитории '$owner/$repo' (ветка: '$branch').\n\n" +
-               "СТАНДАРТЫ И ПРАВИЛА:\n" +
-               "1. ДИРЕКТИВНЫЙ РЕЖИМ (DIRECT MODE):\n" +
-               "   - Для служебных файлов (.gitignore, .gitattributes, gradle.properties), мелких конфигов и единичных правок (до 3 файлов) — используй 'workspace_batch_write' или 'workspace_write_file' НАПРЯМУЮ. Делай это за 1 шаг без созыва роя!\n" +
-               "2. РЕЖИМ РОЯ СТРОИТЕЛЕЙ (SWARM MODE):\n" +
-               "   - Для масштабной кодогенерации шахмат (доменные модели, генератор ходов, AI-движок ELO, блиц-таймеры, Compose UI) — ОБЯЗАТЕЛЬНО используй рой строителей 3.5 Lite: 'swarm_dispatch_primary_builder' (Класс A), 'swarm_dispatch_cross_builder' (Класс B), 'swarm_seal_barrier' и 'swarm_get_reports_manifest'.\n" +
-               "3. ДИФФ И КОММИТ:\n" +
-               "   - Проверяй правки через 'workspace_read_diff'.\n" +
-               "   - Отправляй коммит через 'github_push_atomic_commit'.\n" +
-               "4. АВТО-ОСТАНОВКА:\n" +
-               "   - Как только 'github_push_atomic_commit' вернул 'status: success', а CI в репозитории не настроен — НЕ вызывай никаких других инструментов! Немедленно заверши задачу финальным отчетом.\n" +
-               "5. CI-ВЕРИФИКАЦИЯ:\n" +
-               "   - Вызывай 'github_trigger_ci_build' и 'github_get_ci_status' ТОЛЬКО если в проекте физически существуют файлы .github/workflows/*.yml."
+               "Репозиторий: '$owner/$repo' (ветка: '$branch').\n\n" +
+               "ПРАВИЛА:\n" +
+               "1. ДИРЕКТИВНЫЙ РЕЖИМ: для конфигов (.gitignore, .gitattributes, gradle.properties) используй 'workspace_batch_write' или 'workspace_write_file' НАПРЯМУЮ за 1 шаг без вызова роя!\n" +
+               "2. РЕЖИМ РОЯ: для объемной логики и модулей ОБЯЗАТЕЛЬНО запускай билдеров 3.5 Lite ('swarm_dispatch_primary_builder', 'swarm_dispatch_cross_builder', 'swarm_seal_barrier').\n" +
+               "3. ДИФФ И КОММИТ: проверяй 'workspace_read_diff' и пушь 'github_push_atomic_commit'.\n" +
+               "4. АВТО-ОСТАНОВКА: при успехе коммита и отсутствии CI в репозитории — НЕ вызывай другие инструменты, сразу завершай задачу отчетом!\n" +
+               "5. CI: вызывай 'github_trigger_ci_build' ТОЛЬКО при наличии .github/workflows/*.yml."
     }
 
-    private fun buildInitialUserPrompt(objective: String, totalFiles: Int): String {
-        return "ЦЕЛЕВАЯ ЗАДАЧА РАЗРАБОТКИ:\n$objective\n\n" +
-               "Локальный репозиторий развернут на UFS 4.0 ($totalFiles файлов в снимке). Приступай к выполнению."
+    private fun buildInitialUserPrompt(
+        objective: String,
+        totalFiles: Int,
+        t0Passport: String,
+        stage2Result: Stage2FeasibilityResult,
+        auditReport: String
+    ): String {
+        return "$t0Passport\n\n" +
+               "${stage2Result.logFormattedEntry}\n\n" +
+               "$auditReport\n\n" +
+               "ЦЕЛЕВАЯ ЗАДАЧА КЛИЕНТА:\n$objective\n\n" +
+               "Файлов в репозитории: $totalFiles. Кодовая база изучена и зафиксирована. Приступай к планированию и реализации."
     }
 
     fun cancelTask() {
-        AppLogger.w(AppLogger.TAG_APP, "AutonomousOrchestrator: Команда отмены.")
         activeJob?.cancel()
         activeJob = null
     }
@@ -667,8 +844,6 @@ class AutonomousOrchestrator(
     override fun close() {
         cancelTask()
         releaseWakeLock()
-        if (shouldCloseHttpClient) {
-            httpClient.close()
-        }
+        if (shouldCloseHttpClient) httpClient.close()
     }
 }
