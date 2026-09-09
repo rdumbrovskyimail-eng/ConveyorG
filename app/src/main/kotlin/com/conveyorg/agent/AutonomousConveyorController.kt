@@ -14,10 +14,6 @@ import java.io.Closeable
 import java.io.File
 import java.util.UUID
 
-// ====================================================================
-// 1. Модели Данных Единого Состояния Конвейера (120 Hz AMOLED UI)
-// ====================================================================
-
 data class BuilderCardUiModel(
     val taskId: String,
     val role: BuilderRole,
@@ -41,6 +37,7 @@ data class ConveyorMissionUiState(
     val repairRound: Int = 0,
     val maxRepairRounds: Int = 3,
     val liveOrchestratorThought: String = "",
+    val deepInvestigationLog: String = "",
     val activeToolName: String? = null,
     val isGreenLightOn: Boolean = false,
     val barrierTotal: Int = 0,
@@ -63,10 +60,6 @@ sealed interface ConveyorMissionUiEvent {
     data class MissionFailed(val reason: String) : ConveyorMissionUiEvent
     data class ToastNotification(val message: String) : ConveyorMissionUiEvent
 }
-
-// ====================================================================
-// 2. Главный Контроллер Конвейера: AutonomousConveyorController
-// ====================================================================
 
 class AutonomousConveyorController(
     private val context: Context,
@@ -114,7 +107,6 @@ class AutonomousConveyorController(
                 }
 
                 val sessionId = UUID.randomUUID().toString()
-                AppLogger.i(AppLogger.TAG_APP, "ConveyorController: Инициализация миссии [$sessionId] для $owner/$repo:$branch")
 
                 _uiState.update {
                     ConveyorMissionUiState(
@@ -126,7 +118,7 @@ class AutonomousConveyorController(
                         currentPhase = OrchestratorPhase.INITIALIZING_WORKSPACE,
                         maxSteps = maxSteps,
                         maxRepairRounds = maxRepairRounds,
-                        statusMessage = "Развертывание окружения UFS 4.0 и инициализация агентов..."
+                        statusMessage = "Запуск конвейера (Этапы 1-4)..."
                     )
                 }
 
@@ -158,15 +150,10 @@ class AutonomousConveyorController(
         )
 
         val swarmObserverJob = launch { observeSwarmEvents(swarmCoordinator) }
-
         var taskResult: AutonomousTaskResult? = null
 
         try {
-            _uiState.update { it.copy(statusMessage = "Загрузка архива репозитория из GitHub...") }
-            gitHubEngine.downloadAndUnpackZipball(owner, repo, branch, workspaceManager.workspaceRoot)
-
-            _uiState.update { it.copy(statusMessage = "Фиксация SHA-256 контрольного снимка...") }
-            val baselineFilesCount = workspaceManager.captureBaseline()
+            _uiState.update { it.copy(statusMessage = "Инициализация рабочей области...") }
 
             val orchestrator = AutonomousOrchestrator(
                 context = context,
@@ -177,13 +164,6 @@ class AutonomousConveyorController(
             ).also { activeOrchestrator = it }
 
             val orchestratorObserverJob = launch { observeOrchestratorEvents(orchestrator) }
-
-            _uiState.update {
-                it.copy(
-                    currentPhase = OrchestratorPhase.REASONING_AND_PLANNING,
-                    statusMessage = "Верховный Оркестратор 3.8 Flash исследует проект ($baselineFilesCount файлов)..."
-                )
-            }
 
             taskResult = orchestrator.runAutonomousTask(
                 owner = owner,
@@ -205,6 +185,7 @@ class AutonomousConveyorController(
                         isRunning = false,
                         currentPhase = OrchestratorPhase.COMPLETED,
                         lastCommitSha = taskResult.commitSha,
+                        deepInvestigationLog = taskResult.deepLogContent,
                         statusMessage = taskResult.finalMessage.ifBlank { "Миссия выполнена успешно!" }
                     )
                 }
@@ -216,36 +197,35 @@ class AutonomousConveyorController(
                         isRunning = false,
                         currentPhase = OrchestratorPhase.FAILED,
                         errorDetails = taskResult.finalMessage,
-                        statusMessage = "Миссия завершилась со сбоем: ${taskResult.finalMessage.ifBlank { "Превышен лимит шагов без результата" }}"
+                        deepInvestigationLog = taskResult.deepLogContent,
+                        statusMessage = taskResult.finalMessage
                     )
                 }
                 _uiEvents.emit(ConveyorMissionUiEvent.MissionFailed(taskResult.finalMessage))
             }
 
         } catch (e: CancellationException) {
-            AppLogger.w(AppLogger.TAG_APP, "ConveyorController: Миссия прервана пользователем.")
             withContext(NonCancellable) {
                 executeSagaRollback(workspaceManager)
                 _uiState.update {
                     it.copy(
                         isRunning = false,
                         currentPhase = OrchestratorPhase.CANCELLED,
-                        statusMessage = "Миссия отменена. Рабочая область возвращена к исходному снимку."
+                        statusMessage = "Миссия отменена пользователем."
                     )
                 }
-                _uiEvents.emit(ConveyorMissionUiEvent.ToastNotification("Миссия отменена. Произведен откат изменений."))
+                _uiEvents.emit(ConveyorMissionUiEvent.ToastNotification("Миссия отменена."))
             }
         } catch (e: Exception) {
-            AppLogger.e(AppLogger.TAG_APP, "ConveyorController: Критический сбой миссии: ${e.message}", e)
             _uiState.update {
                 it.copy(
                     isRunning = false,
                     currentPhase = OrchestratorPhase.FAILED,
                     errorDetails = e.localizedMessage,
-                    statusMessage = "Фатальная ошибка: ${e.localizedMessage}"
+                    statusMessage = "Ошибка: ${e.localizedMessage}"
                 )
             }
-            _uiEvents.emit(ConveyorMissionUiEvent.MissionFailed(e.localizedMessage ?: "Неизвестный сбой"))
+            _uiEvents.emit(ConveyorMissionUiEvent.MissionFailed(e.localizedMessage ?: "Сбой"))
         } finally {
             withContext(NonCancellable) {
                 swarmObserverJob.cancel()
@@ -260,7 +240,6 @@ class AutonomousConveyorController(
                 is SwarmEvent.TaskRegistered -> {
                     _uiState.update { current ->
                         val updatedCards = current.builderCards.toMutableList()
-                        val existingIdx = updatedCards.indexOfFirst { it.taskId == event.taskId }
                         val newCard = BuilderCardUiModel(
                             taskId = event.taskId,
                             role = event.role,
@@ -268,11 +247,7 @@ class AutonomousConveyorController(
                             targetFile = event.targetFile,
                             status = BuilderStatus.PENDING
                         )
-                        if (existingIdx != -1) {
-                            updatedCards[existingIdx] = newCard
-                        } else {
-                            updatedCards.add(newCard)
-                        }
+                        updatedCards.add(newCard)
                         current.copy(
                             builderCards = updatedCards,
                             barrierTotal = swarm.state.value.expectedBarrier,
@@ -280,36 +255,23 @@ class AutonomousConveyorController(
                         )
                     }
                 }
-                is SwarmEvent.TaskStarted -> {
-                    updateBuilderCardStatus(event.taskId, BuilderStatus.RUNNING)
-                }
-                is SwarmEvent.TaskAwaitingDependency -> {
-                    updateBuilderCardStatus(event.taskId, BuilderStatus.WAITING_DEPENDENCY)
-                }
+                is SwarmEvent.TaskStarted -> updateBuilderCardStatus(event.taskId, BuilderStatus.RUNNING)
+                is SwarmEvent.TaskAwaitingDependency -> updateBuilderCardStatus(event.taskId, BuilderStatus.WAITING_DEPENDENCY)
                 is SwarmEvent.ReportSubmitted -> {
                     updateBuilderCardStatus(event.taskId, event.status)
                     _uiState.update {
-                        it.copy(
-                            barrierRemaining = event.remaining,
-                            statusMessage = "Получен отчет от ${event.taskId} (осталось: ${event.remaining})"
-                        )
+                        it.copy(barrierRemaining = event.remaining, statusMessage = "Отчет [${event.taskId}]: осталось ${event.remaining}")
                     }
-                    _uiEvents.emit(ConveyorMissionUiEvent.HapticTrigger(isStrong = false))
                 }
                 is SwarmEvent.GreenLightIgnited -> {
                     _uiState.update {
-                        it.copy(
-                            isGreenLightOn = true,
-                            currentPhase = OrchestratorPhase.DUAL_LOOP_VERIFYING,
-                            statusMessage = "🟢 ЗЕЛЕНАЯ ЛАМПОЧКА! Все 20 билдеров завершили работу. Переход к верификации."
-                        )
+                        it.copy(isGreenLightOn = true, statusMessage = "🟢 ЗЕЛЕНАЯ ЛАМПОЧКА! Все отчеты роя получены.")
                     }
                     _uiEvents.emit(ConveyorMissionUiEvent.HapticTrigger(isStrong = true))
                     _uiEvents.emit(ConveyorMissionUiEvent.GreenLightIgnited(event.manifest.totalCompleted, event.manifest.totalDurationMs))
                 }
                 is SwarmEvent.CircuitBreakerTripped -> {
-                    _uiState.update { it.copy(statusMessage = "Предохранитель роя: ${event.reason}") }
-                    _uiEvents.emit(ConveyorMissionUiEvent.ToastNotification("Предохранитель роя активирован!"))
+                    _uiState.update { it.copy(statusMessage = "Предохранитель: ${event.reason}") }
                 }
             }
         }
@@ -324,42 +286,19 @@ class AutonomousConveyorController(
                 is OrchestratorEvent.StepChanged -> {
                     _uiState.update { it.copy(currentStep = event.currentStep, maxSteps = event.maxSteps) }
                 }
-                is OrchestratorEvent.TokensUpdated -> {
-                    calculateEstimatedCost()
-                }
+                is OrchestratorEvent.TokensUpdated -> calculateEstimatedCost()
                 is OrchestratorEvent.ThinkingDelta -> {
-                    _uiState.update {
-                        it.copy(
-                            liveOrchestratorThought = (it.liveOrchestratorThought + event.delta).takeLast(2000)
-                        )
-                    }
+                    _uiState.update { it.copy(liveOrchestratorThought = (it.liveOrchestratorThought + event.delta).takeLast(2000)) }
                 }
-                is OrchestratorEvent.ToolExecuting -> {
-                    _uiState.update { it.copy(activeToolName = event.name) }
+                is OrchestratorEvent.DeepLogAppended -> {
+                    _uiState.update { it.copy(deepInvestigationLog = it.deepInvestigationLog + event.chunk) }
                 }
-                is OrchestratorEvent.ToolFinished -> {
-                    _uiState.update { it.copy(activeToolName = null) }
-                }
-                is OrchestratorEvent.BarrierProgress -> {
-                    _uiState.update {
-                        it.copy(
-                            barrierTotal = event.total,
-                            barrierRemaining = event.remaining,
-                            isGreenLightOn = event.isGreenLight
-                        )
-                    }
-                }
+                is OrchestratorEvent.ToolExecuting -> _uiState.update { it.copy(activeToolName = event.name) }
+                is OrchestratorEvent.ToolFinished -> _uiState.update { it.copy(activeToolName = null) }
                 is OrchestratorEvent.CiStatusUpdated -> {
                     _uiState.update {
-                        it.copy(
-                            ciStatus = event.status,
-                            ciConclusion = event.conclusion,
-                            ciRunHtmlUrl = event.runUrl
-                        )
+                        it.copy(ciStatus = event.status, ciConclusion = event.conclusion, ciRunHtmlUrl = event.runUrl)
                     }
-                }
-                is OrchestratorEvent.TaskFinished -> {
-                    calculateEstimatedCost()
                 }
                 else -> Unit
             }
@@ -368,9 +307,7 @@ class AutonomousConveyorController(
 
     private fun updateBuilderCardStatus(taskId: String, status: BuilderStatus) {
         _uiState.update { current ->
-            val cards = current.builderCards.map { card ->
-                if (card.taskId == taskId) card.copy(status = status) else card
-            }
+            val cards = current.builderCards.map { if (it.taskId == taskId) it.copy(status = status) else it }
             current.copy(builderCards = cards)
         }
     }
@@ -386,25 +323,17 @@ class AutonomousConveyorController(
         val totalTokens = orchestratorState.totalPromptTokens + orchestratorState.totalCandidateTokens + orchestratorState.totalThoughtsTokens + swarmManifestTokens
         val totalCost = cost38Input + cost38Output + cost35
 
-        _uiState.update {
-            it.copy(
-                totalTokensBurned = totalTokens,
-                estimatedCostUsd = totalCost
-            )
-        }
+        _uiState.update { it.copy(totalTokensBurned = totalTokens, estimatedCostUsd = totalCost) }
     }
 
     private fun executeSagaRollback(workspaceManager: LocalWorkspaceManager) {
-        AppLogger.w(AppLogger.TAG_APP, "SagaRollback: Запуск компенсирующей транзакции (откат к .baseline_orig)...")
         val sessionRoot = workspaceManager.workspaceRoot
         val backupDir = File(context.noBackupFilesDir, "workspaces/${workspaceManager.sessionId}/.baseline_orig")
         val baselinePaths = workspaceManager.getBaselinePaths()
 
         sessionRoot.walkTopDown().filter { it.isFile && !it.path.contains(".baseline") }.forEach { file ->
             val relPath = file.relativeTo(sessionRoot).path.replace('\\', '/')
-            if (relPath !in baselinePaths) {
-                file.delete()
-            }
+            if (relPath !in baselinePaths) file.delete()
         }
 
         if (backupDir.exists()) {
@@ -414,7 +343,6 @@ class AutonomousConveyorController(
                 targetFile.parentFile?.mkdirs()
                 backupFile.copyTo(targetFile, overwrite = true)
             }
-            AppLogger.i(AppLogger.TAG_APP, "SagaRollback: Файлы успешно восстановлены из резервной копии.")
         }
     }
 
@@ -422,7 +350,6 @@ class AutonomousConveyorController(
         controllerScope.launch {
             missionMutex.withLock {
                 if (!_uiState.value.isRunning) return@withLock
-                AppLogger.w(AppLogger.TAG_APP, "ConveyorController: Поступила команда принудительной остановки миссии.")
                 activeOrchestrator?.cancelTask()
                 activeSwarmCoordinator?.close()
                 missionJob?.cancel()
@@ -444,15 +371,9 @@ class AutonomousConveyorController(
     override fun close() {
         cancelMission()
         controllerScope.cancel()
-        if (shouldCloseHttpClient) {
-            httpClient.close()
-        }
+        if (shouldCloseHttpClient) httpClient.close()
     }
 }
-
-// ====================================================================
-// 7. Композитный Инструментальный Мост с Инъекцией Роя (Swarm Tools)
-// ====================================================================
 
 class CompositeOrchestratorToolBridge(
     workspaceManager: LocalWorkspaceManager,
@@ -464,58 +385,51 @@ class CompositeOrchestratorToolBridge(
 
     override fun getToolDeclarations(): GeminiToolDto {
         val baseDeclarations = baseBridge.getToolDeclarations().functionDeclarations ?: emptyList()
-
         val swarmDeclarations = listOf(
             FunctionDeclarationDto(
                 name = "swarm_dispatch_primary_builder",
-                description = "Запускает автономного строителя 3.5 Lite (Класс A) для реализации этапа архитектуры (этапы 1..10). Подходит для создания новых классов и интерфейсов.",
+                description = "Запускает строителя 3.5 Lite (Класс A).",
                 parameters = FunctionParametersSchemaDto(
                     properties = mapOf(
-                        "stage_number" to ParameterPropertyDto(type = "INTEGER", description = "Номер этапа (1..10)."),
-                        "target_file" to ParameterPropertyDto(type = "STRING", description = "Путь к файлу для реализации."),
-                        "instruction" to ParameterPropertyDto(type = "STRING", description = "Точная инструкция по реализации функционала."),
-                        "reference_code" to ParameterPropertyDto(type = "STRING", description = "Эталонный архитектурный код интерфейса или класса.")
+                        "stage_number" to ParameterPropertyDto("INTEGER", "Номер этапа."),
+                        "target_file" to ParameterPropertyDto("STRING", "Путь к файлу."),
+                        "instruction" to ParameterPropertyDto("STRING", "Инструкция."),
+                        "reference_code" to ParameterPropertyDto("STRING", "Эталонный код.")
                     ),
                     required = listOf("stage_number", "target_file", "instruction")
                 )
             ),
             FunctionDeclarationDto(
                 name = "swarm_dispatch_cross_builder",
-                description = "Запускает сквозного строителя 3.5 Lite (Класс B), который строго ожидает завершения указанного предшественника (Закон A -> B). Может как создавать новые зависимые классы, так и модифицировать существующие файлы.",
+                description = "Запускает сквозного строителя 3.5 Lite (Класс B), ожидающего предшественника.",
                 parameters = FunctionParametersSchemaDto(
                     properties = mapOf(
-                        "dependency_task_id" to ParameterPropertyDto(type = "STRING", description = "ID родительской задачи, завершения которой нужно дождаться."),
-                        "stage_number" to ParameterPropertyDto(type = "INTEGER", description = "Номер текущего этапа."),
-                        "target_file" to ParameterPropertyDto(type = "STRING", description = "Путь к файлу для реализации или модификации."),
-                        "instruction" to ParameterPropertyDto(type = "STRING", description = "Инструкция по реализации или модификации файла.")
+                        "dependency_task_id" to ParameterPropertyDto("STRING", "ID родителя."),
+                        "stage_number" to ParameterPropertyDto("INTEGER", "Номер этапа."),
+                        "target_file" to ParameterPropertyDto("STRING", "Путь к файлу."),
+                        "instruction" to ParameterPropertyDto("STRING", "Инструкция.")
                     ),
                     required = listOf("dependency_task_id", "stage_number", "target_file", "instruction")
                 )
             ),
             FunctionDeclarationDto(
                 name = "swarm_seal_barrier",
-                description = "Запечатывает барьер синхронизации на точное количество ожидаемых отчетов N (максимум 20). Включает обратный отсчет до Зеленой лампочки.",
+                description = "Запечатывает барьер синхронизации на N отчетов.",
                 parameters = FunctionParametersSchemaDto(
-                    properties = mapOf(
-                        "expected_count" to ParameterPropertyDto(type = "INTEGER", description = "Общее число запущенных задач (до 20).")
-                    ),
+                    properties = mapOf("expected_count" to ParameterPropertyDto("INTEGER", "Число задач.")),
                     required = listOf("expected_count")
                 )
             ),
             FunctionDeclarationDto(
                 name = "swarm_get_reports_manifest",
-                description = "Возвращает сводный манифест всех отчетов билдеров после зажигания Зеленой лампочки для финального семантического аудита.",
+                description = "Возвращает сводный манифест после зажигания Зеленой лампочки.",
                 parameters = FunctionParametersSchemaDto(properties = emptyMap())
             )
         )
-
         return GeminiToolDto(functionDeclarations = baseDeclarations + swarmDeclarations)
     }
 
-    override suspend fun dispatchToolCall(
-        call: FunctionCallDto,
-        thoughtSignature: String?
-    ): FunctionResponsePartDto {
+    override suspend fun dispatchToolCall(call: FunctionCallDto, thoughtSignature: String?): FunctionResponsePartDto {
         return try {
             when (call.name) {
                 "swarm_dispatch_primary_builder" -> {
@@ -523,86 +437,30 @@ class CompositeOrchestratorToolBridge(
                     val file = call.args["target_file"]?.jsonPrimitive?.content ?: "Unknown.kt"
                     val instruction = call.args["instruction"]?.jsonPrimitive?.content ?: ""
                     val refCode = call.args["reference_code"]?.jsonPrimitive?.contentOrNull
-
                     val taskId = swarmCoordinator.registerPrimaryBuilderA(stage, file, instruction, refCode)
-                    createSuccessResponse(call.name, call.id, buildJsonObject {
-                        put("status", "registered")
-                        put("task_id", taskId)
-                        put("role", "PRIMARY_A")
-                        put("message", "Строитель A запущен в изолированном фоновом потоке.")
-                    })
+                    FunctionResponsePartDto(FunctionResponseDto(call.name, buildJsonObject { put("task_id", taskId) }, call.id))
                 }
                 "swarm_dispatch_cross_builder" -> {
                     val depId = call.args["dependency_task_id"]?.jsonPrimitive?.content ?: ""
                     val stage = call.args["stage_number"]?.jsonPrimitive?.int ?: 1
                     val file = call.args["target_file"]?.jsonPrimitive?.content ?: "Unknown.kt"
                     val instruction = call.args["instruction"]?.jsonPrimitive?.content ?: ""
-
                     val taskId = swarmCoordinator.registerCrossCuttingBuilderB(depId, stage, file, instruction)
-                    createSuccessResponse(call.name, call.id, buildJsonObject {
-                        put("status", "registered_waiting")
-                        put("task_id", taskId)
-                        put("role", "CROSS_CUTTING_B")
-                        put("waiting_for", depId)
-                        put("message", "Сквозной строитель B заблокирован до получения отчета от $depId.")
-                    })
+                    FunctionResponsePartDto(FunctionResponseDto(call.name, buildJsonObject { put("task_id", taskId) }, call.id))
                 }
                 "swarm_seal_barrier" -> {
                     val count = call.args["expected_count"]?.jsonPrimitive?.int ?: 20
-                    val sealed = swarmCoordinator.sealBarrier(count)
-                    createSuccessResponse(call.name, call.id, buildJsonObject {
-                        put("status", if (sealed) "sealed" else "error")
-                        put("expected_total", count)
-                        put("message", "Барьер запечатан. Обратный отсчет активирован.")
-                    })
+                    swarmCoordinator.sealBarrier(count)
+                    FunctionResponsePartDto(FunctionResponseDto(call.name, buildJsonObject { put("status", "sealed") }, call.id))
                 }
                 "swarm_get_reports_manifest" -> {
-                    val manifest = swarmCoordinator.awaitGreenLight(timeoutMs = 120_000L)
-                    createSuccessResponse(call.name, call.id, buildJsonObject {
-                        put("status", "green_light_manifest_ready")
-                        put("total_completed", manifest.totalCompleted)
-                        put("success_count", manifest.successCount)
-                        put("failed_count", manifest.failedCount)
-                        put("aborted_count", manifest.abortedCount)
-                        putJsonArray("reports_summary") {
-                            manifest.reports.forEach { r ->
-                                addJsonObject {
-                                    put("task_id", r.taskId)
-                                    put("target_file", r.targetFile)
-                                    put("status", r.status)
-                                    put("summary", r.summary)
-                                }
-                            }
-                        }
-                    })
+                    val manifest = swarmCoordinator.awaitGreenLight(120_000L)
+                    FunctionResponsePartDto(FunctionResponseDto(call.name, buildJsonObject { put("total_completed", manifest.totalCompleted) }, call.id))
                 }
-                else -> {
-                    baseBridge.dispatchToolCall(call, thoughtSignature)
-                }
+                else -> baseBridge.dispatchToolCall(call, thoughtSignature)
             }
         } catch (e: Exception) {
-            AppLogger.e(AppLogger.TAG_ENGINE, "CompositeToolBridge: Ошибка исполнения '${call.name}': ${e.message}", e)
-            FunctionResponsePartDto(
-                functionResponse = FunctionResponseDto(
-                    name = call.name,
-                    response = buildJsonObject {
-                        put("status", "error")
-                        put("error_message", e.localizedMessage ?: "Сбой выполнения инструмента роя")
-                        put("tool", call.name)
-                    },
-                    id = call.id
-                )
-            )
+            FunctionResponsePartDto(FunctionResponseDto(call.name, buildJsonObject { put("error", e.localizedMessage ?: "Сбой") }, call.id))
         }
-    }
-
-    private fun createSuccessResponse(name: String, callId: String?, output: JsonObject): FunctionResponsePartDto {
-        return FunctionResponsePartDto(
-            functionResponse = FunctionResponseDto(
-                name = name,
-                response = buildJsonObject { put("output", output) },
-                id = callId
-            )
-        )
     }
 }
