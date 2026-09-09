@@ -20,30 +20,18 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-// ====================================================================
-// 1. Модели Состояния и Разовых Эффектов Экрана Mission Control
-// ====================================================================
-
 data class ConveyorScreenUiState(
-    // Поля ввода конфигурации задачи
     val repoInput: String = "owner/repository",
     val branchInput: String = "main",
     val objectiveInput: String = "",
-
-    // Состояние активной миссии (телеметрия из контроллера)
     val mission: ConveyorMissionUiState = ConveyorMissionUiState(),
-
-    // Интерактивное состояние аккордеона 20 строителей
     val expandedBuilderTaskId: String? = null,
-
-    // Сейф учетных данных (Knox Vault)
     val isSettingsDialogOpen: Boolean = false,
+    val isDeepLogOpen: Boolean = false,
     val geminiApiKeyMasked: String = "",
     val githubPatMasked: String = "",
     val hasValidGeminiKey: Boolean = false,
     val hasValidGitHubPat: Boolean = false,
-
-    // Баннеры ошибок и уведомлений
     val activeBannerError: String? = null
 )
 
@@ -56,10 +44,6 @@ sealed interface ConveyorScreenSideEffect {
     data object ScrollToActiveSection : ConveyorScreenSideEffect
 }
 
-// ====================================================================
-// 2. Презентационный Мост Жизненного Цикла: ConveyorViewModel
-// ====================================================================
-
 class ConveyorViewModel(
     application: Application,
     private val savedStateHandle: SavedStateHandle
@@ -70,35 +54,26 @@ class ConveyorViewModel(
         private const val PREF_FILE_FALLBACK = "conveyorg_vault_fallback"
         private const val KEY_GEMINI_KEY = "vault_gemini_api_key"
         private const val KEY_GITHUB_PAT = "vault_github_pat_token"
-
         private const val STATE_KEY_REPO = "saved_repo_input"
         private const val STATE_KEY_BRANCH = "saved_branch_input"
         private const val STATE_KEY_OBJECTIVE = "saved_objective_input"
     }
 
-    @Volatile
-    private var cachedGeminiKey: String = ""
+    @Volatile private var cachedGeminiKey: String = ""
+    @Volatile private var cachedGitHubPat: String = ""
+    @Volatile private var securePrefs: SharedPreferences? = null
 
-    @Volatile
-    private var cachedGitHubPat: String = ""
-
-    @Volatile
-    private var securePrefs: SharedPreferences? = null
-
-    // Главный исполнительный контроллер конвейера
     private val conveyorController: AutonomousConveyorController
 
-    // Единый источник правды для Compose UI
     private val _screenState = MutableStateFlow(
         ConveyorScreenUiState(
-            repoInput = savedStateHandle.get<String>(STATE_KEY_REPO) ?: "clientg-org/german-learning-app",
+            repoInput = savedStateHandle.get<String>(STATE_KEY_REPO) ?: "rdumbrovskyimail-eng/TestC",
             branchInput = savedStateHandle.get<String>(STATE_KEY_BRANCH) ?: "main",
             objectiveInput = savedStateHandle.get<String>(STATE_KEY_OBJECTIVE) ?: ""
         )
     )
     val screenState: StateFlow<ConveyorScreenUiState> = _screenState.asStateFlow()
 
-    // Горячий канал разовых побочных эффектов (Haptics, Toasts)
     private val _sideEffects = Channel<ConveyorScreenSideEffect>(
         capacity = Channel.BUFFERED,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
@@ -106,9 +81,6 @@ class ConveyorViewModel(
     val sideEffects: Flow<ConveyorScreenSideEffect> = _sideEffects.receiveAsFlow()
 
     init {
-        AppLogger.i(AppLogger.TAG_VM, "ConveyorViewModel: Инициализация. Синхронное чтение ключей хранилища...")
-
-        // Читаем ключи сразу при старте, чтобы они были готовы к первому же клику
         val initialPrefs = getSecurePreferences(getApplication())
         val initialGemini = initialPrefs.getString(KEY_GEMINI_KEY, "") ?: ""
         val initialGitHub = initialPrefs.getString(KEY_GITHUB_PAT, "") ?: ""
@@ -125,23 +97,18 @@ class ConveyorViewModel(
             )
         }
 
-        // Инициализируем контроллер с провайдерами ключей
         conveyorController = AutonomousConveyorController(
             context = getApplication(),
             geminiApiKeyProvider = { cachedGeminiKey },
             gitHubTokenProvider = { cachedGitHubPat }
         )
 
-        // Реактивное слияние телеметрии контроллера в Compose UI State
         viewModelScope.launch {
             conveyorController.uiState.collect { missionState ->
-                _screenState.update { current ->
-                    current.copy(mission = missionState)
-                }
+                _screenState.update { it.copy(mission = missionState) }
             }
         }
 
-        // Прослушивание событий миссии и тактильная оркестрация
         viewModelScope.launch {
             conveyorController.uiEvents.collect { event ->
                 handleConveyorUiEvent(event)
@@ -149,17 +116,13 @@ class ConveyorViewModel(
         }
     }
 
-    // ====================================================================
-    // 3. Пользовательские Команды (User Intents & Input Hoisting)
-    // ====================================================================
-
     fun onRepoInputChanged(newValue: String) {
         val trimmed = newValue.trim()
         savedStateHandle[STATE_KEY_REPO] = trimmed
         _screenState.update { it.copy(repoInput = trimmed) }
     }
 
-    fun onBranchInputChanged(newValue: String) {
+    fun onBranchChanged(newValue: String) {
         val trimmed = newValue.trim()
         savedStateHandle[STATE_KEY_BRANCH] = trimmed
         _screenState.update { it.copy(branchInput = trimmed) }
@@ -170,92 +133,36 @@ class ConveyorViewModel(
         _screenState.update { it.copy(objectiveInput = newValue) }
     }
 
-    /**
-     * Запуск сквозной миссии конвейера.
-     */
     fun onStartMission() {
         val current = _screenState.value
-
-        // Валидация ключей авторизации
         if (cachedGeminiKey.isBlank() || cachedGitHubPat.isBlank()) {
-            _screenState.update {
-                it.copy(
-                    isSettingsDialogOpen = true,
-                    activeBannerError = "Для запуска конвейера необходимо указать Gemini API Key и GitHub PAT."
-                )
-            }
-            _sideEffects.trySend(ConveyorScreenSideEffect.ShowToast("Укажите ключи доступа в настройках"))
+            _screenState.update { it.copy(isSettingsDialogOpen = true, activeBannerError = "Укажите ключи доступа.") }
             return
         }
 
-        // Валидация параметров репозитория
         val repoParts = current.repoInput.split('/')
         if (repoParts.size != 2 || repoParts[0].isBlank() || repoParts[1].isBlank()) {
-            _screenState.update {
-                it.copy(activeBannerError = "Укажите репозиторий в формате 'owner/repository'.")
-            }
+            _screenState.update { it.copy(activeBannerError = "Формат: owner/repository.") }
             return
         }
 
-        if (current.objectiveInput.isBlank()) {
-            _screenState.update {
-                it.copy(activeBannerError = "Опишите целевую задачу разработки.")
-            }
-            return
-        }
-
-        _screenState.update {
-            it.copy(
-                activeBannerError = null,
-                expandedBuilderTaskId = null
-            )
-        }
-
-        AppLogger.i(AppLogger.TAG_VM, "ConveyorViewModel: Старт миссии для ${current.repoInput}:${current.branchInput}")
+        _screenState.update { it.copy(activeBannerError = null, expandedBuilderTaskId = null) }
 
         conveyorController.startMission(
             owner = repoParts[0].trim(),
             repo = repoParts[1].trim(),
             branch = current.branchInput.trim(),
-            userObjective = current.objectiveInput.trim(),
-            maxSteps = 25,
-            maxRepairRounds = 3
+            userObjective = current.objectiveInput.trim()
         )
-
-        _sideEffects.trySend(ConveyorScreenSideEffect.ScrollToActiveSection)
     }
 
     fun onCancelMission() {
-        AppLogger.w(AppLogger.TAG_VM, "ConveyorViewModel: Пользователь отменил миссию конвейера.")
         conveyorController.cancelMission()
-        _sideEffects.trySend(ConveyorScreenSideEffect.ShowToast("Миссия отменена. Производится откат изменений..."))
     }
 
-    // ====================================================================
-    // 4. Интерактивный Аккордеон Карточек 20 Билдеров
-    // ====================================================================
-
-    /**
-     * Раскрытие/сворачивание карточки конкретного строителя в сетке.
-     */
-    fun onToggleBuilderCard(taskId: String) {
-        _screenState.update { current ->
-            val nextExpanded = if (current.expandedBuilderTaskId == taskId) null else taskId
-            current.copy(expandedBuilderTaskId = nextExpanded)
-        }
-        _sideEffects.trySend(ConveyorScreenSideEffect.HapticReportTick)
+    fun onToggleDeepLog() {
+        _screenState.update { it.copy(isDeepLogOpen = !it.isDeepLogOpen) }
     }
-
-    fun onCollapseExpandedCard() {
-        if (_screenState.value.expandedBuilderTaskId != null) {
-            _screenState.update { it.copy(expandedBuilderTaskId = null) }
-            _sideEffects.trySend(ConveyorScreenSideEffect.HapticReportTick)
-        }
-    }
-
-    // ====================================================================
-    // 5. Безопасное Управление Ключами (Samsung Knox Vault)
-    // ====================================================================
 
     fun onOpenSettingsDialog() {
         _screenState.update { it.copy(isSettingsDialogOpen = true) }
@@ -265,8 +172,15 @@ class ConveyorViewModel(
         _screenState.update { it.copy(isSettingsDialogOpen = false) }
     }
 
+    fun onToggleBuilderCard(taskId: String) {
+        _screenState.update { it.copy(expandedBuilderTaskId = if (it.expandedBuilderTaskId == taskId) null else taskId) }
+    }
+
+    fun onCollapseExpandedCard() {
+        _screenState.update { it.copy(expandedBuilderTaskId = null) }
+    }
+
     fun onSaveCredentials(geminiKey: String, githubPat: String) {
-        // Если поле оставили пустым — сохраняем уже имеющийся ключ!
         val cleanGemini = geminiKey.trim().ifBlank { cachedGeminiKey }
         val cleanGitHub = githubPat.trim().ifBlank { cachedGitHubPat }
 
@@ -274,30 +188,19 @@ class ConveyorViewModel(
         cachedGitHubPat = cleanGitHub
 
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val editor = getSecurePreferences(getApplication()).edit()
-                editor.putString(KEY_GEMINI_KEY, cleanGemini)
-                editor.putString(KEY_GITHUB_PAT, cleanGitHub)
-                val isCommitted = editor.commit() // СИНХРОННЫЙ СБРОС НА ФИЗИЧЕСКИЙ ДИСК UFS 4.0
+            val editor = getSecurePreferences(getApplication()).edit()
+            editor.putString(KEY_GEMINI_KEY, cleanGemini)
+            editor.putString(KEY_GITHUB_PAT, cleanGitHub)
+            editor.commit()
 
-                _screenState.update {
-                    it.copy(
-                        geminiApiKeyMasked = AppLogger.maskKey(cleanGemini),
-                        githubPatMasked = AppLogger.maskKey(cleanGitHub),
-                        hasValidGeminiKey = cleanGemini.isNotBlank(),
-                        hasValidGitHubPat = cleanGitHub.isNotBlank(),
-                        isSettingsDialogOpen = false,
-                        activeBannerError = if (isCommitted) null else "Сбой физической записи на диск."
-                    )
-                }
-
-                _sideEffects.trySend(ConveyorScreenSideEffect.ShowToast("Ключи надежно зафиксированы на устройстве"))
-                AppLogger.i(AppLogger.TAG_VM, "ConveyorViewModel: Ключи успешно сохранены (commit=$isCommitted).")
-            } catch (e: Exception) {
-                AppLogger.e(AppLogger.TAG_VM, "ConveyorViewModel: Ошибка записи: ${e.message}", e)
-                withContext(Dispatchers.Main) {
-                    _screenState.update { it.copy(activeBannerError = "Ошибка сохранения ключей: ${e.localizedMessage}") }
-                }
+            _screenState.update {
+                it.copy(
+                    geminiApiKeyMasked = AppLogger.maskKey(cleanGemini),
+                    githubPatMasked = AppLogger.maskKey(cleanGitHub),
+                    hasValidGeminiKey = cleanGemini.isNotBlank(),
+                    hasValidGitHubPat = cleanGitHub.isNotBlank(),
+                    isSettingsDialogOpen = false
+                )
             }
         }
     }
@@ -306,41 +209,18 @@ class ConveyorViewModel(
         _screenState.update { it.copy(activeBannerError = null) }
     }
 
-    // ====================================================================
-    // 6. Обработка Событий Конвейера и Тактильная Отдача (Haptics)
-    // ====================================================================
-
     private fun handleConveyorUiEvent(event: ConveyorMissionUiEvent) {
         when (event) {
-            is ConveyorMissionUiEvent.HapticTrigger -> {
-                val effect = if (event.isStrong) {
-                    ConveyorScreenSideEffect.HapticGreenLightIgnited
-                } else {
-                    ConveyorScreenSideEffect.HapticReportTick
-                }
-                _sideEffects.trySend(effect)
-            }
-            is ConveyorMissionUiEvent.GreenLightIgnited -> {
-                _sideEffects.trySend(ConveyorScreenSideEffect.HapticGreenLightIgnited)
-                _sideEffects.trySend(ConveyorScreenSideEffect.ShowToast("🟢 ЗЕЛЕНАЯ ЛАМПОЧКА! Все ${event.totalCompleted} отчетов собраны."))
-            }
-            is ConveyorMissionUiEvent.MissionCompleted -> {
-                _sideEffects.trySend(ConveyorScreenSideEffect.HapticMissionCompleted)
-                _sideEffects.trySend(ConveyorScreenSideEffect.ShowToast("Миссия завершена! Коммит зафиксирован."))
-            }
+            is ConveyorMissionUiEvent.HapticTrigger -> _sideEffects.trySend(if (event.isStrong) ConveyorScreenSideEffect.HapticGreenLightIgnited else ConveyorScreenSideEffect.HapticReportTick)
+            is ConveyorMissionUiEvent.GreenLightIgnited -> _sideEffects.trySend(ConveyorScreenSideEffect.HapticGreenLightIgnited)
+            is ConveyorMissionUiEvent.MissionCompleted -> _sideEffects.trySend(ConveyorScreenSideEffect.HapticMissionCompleted)
             is ConveyorMissionUiEvent.MissionFailed -> {
                 _sideEffects.trySend(ConveyorScreenSideEffect.HapticMissionFailed)
                 _screenState.update { it.copy(activeBannerError = event.reason) }
             }
-            is ConveyorMissionUiEvent.ToastNotification -> {
-                _sideEffects.trySend(ConveyorScreenSideEffect.ShowToast(event.message))
-            }
+            is ConveyorMissionUiEvent.ToastNotification -> _sideEffects.trySend(ConveyorScreenSideEffect.ShowToast(event.message))
         }
     }
-
-    // ====================================================================
-    // 7. Инфраструктура Безопасного Хранилища SharedPreferences
-    // ====================================================================
 
     private fun getSecurePreferences(context: Context): SharedPreferences {
         return securePrefs ?: synchronized(this) {
@@ -350,32 +230,19 @@ class ConveyorViewModel(
 
     private fun createSafeSharedPreferences(context: Context): SharedPreferences {
         return try {
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-
+            val masterKey = MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
             EncryptedSharedPreferences.create(
-                context,
-                PREF_FILE_SECURE,
-                masterKey,
+                context, PREF_FILE_SECURE, masterKey,
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
             )
-        } catch (t: Throwable) {
-            AppLogger.w(AppLogger.TAG_VM, "Knox Vault Keystore недоступен, откат к fallback SharedPreferences: ${t.message}")
+        } catch (_: Throwable) {
             context.getSharedPreferences(PREF_FILE_FALLBACK, Context.MODE_PRIVATE)
         }
     }
 
-    // ====================================================================
-    // 8. Финализация Жизненного Цикла (Lifecycle Teardown)
-    // ====================================================================
-
     override fun onCleared() {
         super.onCleared()
-        AppLogger.w(AppLogger.TAG_VM, "ConveyorViewModel: onCleared -> Освобождение ресурсов конвейера...")
-        viewModelScope.launch(NonCancellable) {
-            conveyorController.close()
-        }
+        viewModelScope.launch(NonCancellable) { conveyorController.close() }
     }
 }
