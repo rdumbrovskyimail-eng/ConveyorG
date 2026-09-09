@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -24,7 +23,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -34,9 +32,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.liveRegion
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
@@ -51,11 +46,6 @@ import com.conveyorg.agent.BuilderCardUiModel
 import com.conveyorg.agent.BuilderRole
 import com.conveyorg.agent.BuilderStatus
 import com.conveyorg.agent.OrchestratorPhase
-import kotlinx.coroutines.launch
-
-// ====================================================================
-// Палитра True Dark AMOLED Terminal (WCAG 2.1 AAA)
-// ====================================================================
 
 private val TerminalBg = Color(0xFF08080A)
 private val MonolithBlack = Color(0xFF000000)
@@ -65,8 +55,6 @@ private val BorderDim = Color(0xFF22252B)
 
 private val CardClassA = Color(0xFF131518)
 private val CardClassB = Color(0xFF1B1E24)
-private val CardBorderA = Color(0xFF262A33)
-private val CardBorderB = Color(0xFF384050)
 
 private val NeonBlue = Color(0xFF3B82F6)
 private val NeonCyan = Color(0xFF06B6D4)
@@ -84,59 +72,34 @@ private val MonospaceTypography = TextStyle(
     platformStyle = PlatformTextStyle(includeFontPadding = false)
 )
 
-// ====================================================================
-// Главный Экран: ConveyorMissionScreen
-// ====================================================================
-
 @Composable
-fun ConveyorMissionScreen(
-    viewModel: ConveyorViewModel
-) {
+fun ConveyorMissionScreen(viewModel: ConveyorViewModel) {
     val state by viewModel.screenState.collectAsState()
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
-    val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
 
     val mainScrollState = rememberScrollState()
-    val gridState = rememberLazyGridState()
-
-    var showReportDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         viewModel.sideEffects.collect { effect ->
             when (effect) {
-                is ConveyorScreenSideEffect.HapticReportTick -> {
-                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                }
-                is ConveyorScreenSideEffect.HapticGreenLightIgnited -> {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                }
-                is ConveyorScreenSideEffect.HapticMissionCompleted -> {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                }
-                is ConveyorScreenSideEffect.HapticMissionFailed -> {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                }
-                is ConveyorScreenSideEffect.ShowToast -> {
-                    Toast.makeText(context, effect.message, Toast.LENGTH_SHORT).show()
-                }
-                is ConveyorScreenSideEffect.ScrollToActiveSection -> {
-                    scope.launch { mainScrollState.animateScrollTo(200) }
-                }
+                is ConveyorScreenSideEffect.HapticReportTick -> haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                is ConveyorScreenSideEffect.HapticGreenLightIgnited,
+                is ConveyorScreenSideEffect.HapticMissionCompleted,
+                is ConveyorScreenSideEffect.HapticMissionFailed -> haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                is ConveyorScreenSideEffect.ShowToast -> Toast.makeText(context, effect.message, Toast.LENGTH_SHORT).show()
+                else -> Unit
             }
         }
     }
 
-    BackHandler(
-        enabled = state.expandedBuilderTaskId != null || state.isSettingsDialogOpen || state.mission.isRunning || showReportDialog
-    ) {
+    BackHandler(enabled = state.isDeepLogOpen || state.expandedBuilderTaskId != null || state.isSettingsDialogOpen) {
         when {
-            showReportDialog -> showReportDialog = false
+            state.isDeepLogOpen -> viewModel.onToggleDeepLog()
             state.expandedBuilderTaskId != null -> viewModel.onCollapseExpandedCard()
             state.isSettingsDialogOpen -> viewModel.onCloseSettingsDialog()
-            state.mission.isRunning -> viewModel.onCancelMission()
         }
     }
 
@@ -152,51 +115,33 @@ fun ConveyorMissionScreen(
                 .verticalScroll(mainScrollState)
                 .padding(bottom = 90.dp)
         ) {
-            // 1. Хедер
             MissionHeaderBar(
                 state = state,
-                onOpenSettings = { viewModel.onOpenSettingsDialog() }
+                onOpenSettings = { viewModel.onOpenSettingsDialog() },
+                onToggleDeepLog = { viewModel.onToggleDeepLog() }
             )
 
             AnimatedVisibility(visible = state.activeBannerError != null) {
-                ErrorBannerCard(
-                    errorMessage = state.activeBannerError ?: "",
-                    onDismiss = { viewModel.onDismissBannerError() }
-                )
+                ErrorBannerCard(errorMessage = state.activeBannerError ?: "") { viewModel.onDismissBannerError() }
             }
 
-            // 2. Монолитный квадрат Оркестратора
             OrchestratorMonolithCard(
                 state = state,
-                onOpenReport = { showReportDialog = true },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 6.dp)
+                onOpenLog = { viewModel.onToggleDeepLog() },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)
             )
 
-            // 3. Рандеву-Бар
             RendezvousBarrierBar(
                 state = state,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)
             )
 
-            // 4. Сетка строителей роя
-            AnimatedVisibility(
-                visible = !state.mission.isGreenLightOn,
-                enter = expandVertically(spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(),
-                exit = shrinkVertically(tween(700, easing = FastOutSlowInEasing)) + fadeOut(tween(500))
-            ) {
+            AnimatedVisibility(visible = !state.mission.isGreenLightOn) {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
                         text = "РОЙ СТРОИТЕЛЕЙ (10 A • 10 B)",
-                        color = TextMuted,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.2.sp,
-                        style = MonospaceTypography,
-                        modifier = Modifier.padding(start = 18.dp, top = 6.dp, bottom = 6.dp)
+                        color = TextMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                        style = MonospaceTypography, modifier = Modifier.padding(start = 18.dp, top = 6.dp, bottom = 6.dp)
                     )
 
                     if (state.mission.builderCards.isEmpty()) {
@@ -204,22 +149,14 @@ fun ConveyorMissionScreen(
                     } else {
                         LazyVerticalGrid(
                             columns = GridCells.Adaptive(minSize = 165.dp),
-                            state = gridState,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 640.dp)
-                                .padding(horizontal = 14.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 640.dp).padding(horizontal = 14.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            items(
-                                items = state.mission.builderCards,
-                                key = { it.taskId }
-                            ) { card ->
-                                val isExpanded = state.expandedBuilderTaskId == card.taskId
+                            items(items = state.mission.builderCards, key = { it.taskId }) { card ->
                                 BuilderCardItem(
                                     card = card,
-                                    isExpanded = isExpanded,
+                                    isExpanded = state.expandedBuilderTaskId == card.taskId,
                                     onToggle = { viewModel.onToggleBuilderCard(card.taskId) },
                                     onCollapse = { viewModel.onCollapseExpandedCard() }
                                 )
@@ -229,26 +166,18 @@ fun ConveyorMissionScreen(
                 }
             }
 
-            // 5. Консоль после барьера
-            AnimatedVisibility(
-                visible = state.mission.isGreenLightOn,
-                enter = expandVertically(tween(700)) + fadeIn(tween(500)),
-                exit = shrinkVertically() + fadeOut()
-            ) {
+            AnimatedVisibility(visible = state.mission.isGreenLightOn) {
                 PostBarrierVerificationConsole(
                     state = state,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)
                 )
             }
         }
 
-        // 6. Нижняя капсула управления
         MissionControlCapsule(
             state = state,
             onRepoChanged = { viewModel.onRepoInputChanged(it) },
-            onBranchChanged = { viewModel.onBranchInputChanged(it) },
+            onBranchChanged = { viewModel.onBranchChanged(it) },
             onObjectiveChanged = { viewModel.onObjectiveInputChanged(it) },
             onStart = {
                 viewModel.onStartMission()
@@ -257,14 +186,9 @@ fun ConveyorMissionScreen(
             },
             onCancel = { viewModel.onCancelMission() },
             onCollapseCard = { viewModel.onCollapseExpandedCard() },
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.ime)
-                .padding(horizontal = 14.dp, vertical = 8.dp)
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.ime).padding(horizontal = 14.dp, vertical = 8.dp)
         )
 
-        // 7. Диалог Knox Vault
         if (state.isSettingsDialogOpen) {
             KnoxVaultSettingsDialog(
                 currentGeminiKey = state.geminiApiKeyMasked,
@@ -274,607 +198,258 @@ fun ConveyorMissionScreen(
             )
         }
 
-        // 8. Всплывающее окно полного отчета
-        if (showReportDialog) {
-            MissionReportDialog(
-                title = if (state.mission.currentPhase == OrchestratorPhase.COMPLETED) "ОТЧЕТ ОРКЕСТРАТОРА (УСПЕХ)" else "ОТЧЕТ МИССИИ",
-                content = state.mission.statusMessage.ifBlank { "Отчет отсутствует." },
-                onDismiss = { showReportDialog = false }
+        if (state.isDeepLogOpen) {
+            DeepLogDialog(
+                logContent = state.mission.deepInvestigationLog.ifBlank { "Журнал сессии пока пуст. Запустите задачу для формирования этапов 1-4." },
+                onDismiss = { viewModel.onToggleDeepLog() }
             )
         }
     }
 }
 
-// ====================================================================
-// Зона 1: Системный Хедер
-// ====================================================================
-
 @Composable
 private fun MissionHeaderBar(
     state: ConveyorScreenUiState,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onToggleDeepLog: () -> Unit
 ) {
-    Surface(
-        color = SurfaceDark,
-        border = BorderStroke(1.dp, BorderDim),
-        modifier = Modifier.fillMaxWidth()
-    ) {
+    Surface(color = SurfaceDark, border = BorderStroke(1.dp, BorderDim), modifier = Modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(7.dp)
-                            .clip(CircleShape)
-                            .background(if (state.mission.isRunning) NeonCyan else LedDimGray)
-                    )
+                    Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(if (state.mission.isRunning) NeonCyan else LedDimGray))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (state.mission.isRunning) state.mission.repositoryName.ifEmpty { "MISSION ACTIVE" } else "CONVEYOR-G TERMINAL",
-                        color = TextPrimary,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        style = MonospaceTypography
+                        text = if (state.mission.isRunning) state.mission.repositoryName else "CONVEYOR-G",
+                        color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography
                     )
-                    if (state.mission.targetBranch.isNotBlank()) {
+                }
+                Text(
+                    text = "${state.mission.totalTokensBurned} tok • $${String.format(java.util.Locale.US, "%.4f", state.mission.estimatedCostUsd)}",
+                    color = NeonGreen, fontSize = 10.sp, style = MonospaceTypography, modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (state.mission.deepInvestigationLog.isNotBlank()) Color(0xFF1E293B) else Color(0xFF111318),
+                    border = BorderStroke(1.dp, if (state.mission.deepInvestigationLog.isNotBlank()) NeonCyan else BorderDim),
+                    modifier = Modifier.clickable { onToggleDeepLog() }
+                ) {
+                    Row(modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = ":${state.mission.targetBranch}",
-                            color = NeonCyan,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            style = MonospaceTypography
+                            text = "ЖУРНАЛ / LOG",
+                            color = if (state.mission.deepInvestigationLog.isNotBlank()) NeonCyan else TextMuted,
+                            fontSize = 10.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography
                         )
                     }
                 }
 
-                Row(
-                    modifier = Modifier.padding(top = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                Surface(
+                    shape = RoundedCornerShape(8.dp), color = Color(0xFF0F172A), border = BorderStroke(1.dp, Color(0xFF1E293B)),
+                    modifier = Modifier.clickable { onOpenSettings() }
                 ) {
-                    Text(
-                        text = "${state.mission.totalTokensBurned} tok",
-                        color = TextMuted,
-                        fontSize = 11.sp,
-                        style = MonospaceTypography
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "•  $${String.format(java.util.Locale.US, "%.4f", state.mission.estimatedCostUsd)}",
-                        color = NeonGreen,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        style = MonospaceTypography
-                    )
-                }
-            }
-
-            Surface(
-                shape = RoundedCornerShape(8.dp),
-                color = Color(0xFF0F172A),
-                border = BorderStroke(1.dp, Color(0xFF1E293B)),
-                modifier = Modifier.clickable { onOpenSettings() }
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Default.Lock,
-                        contentDescription = "Knox Vault",
-                        tint = if (state.hasValidGeminiKey && state.hasValidGitHubPat) NeonGreen else NeonAmber,
-                        modifier = Modifier.size(13.dp)
-                    )
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = "KNOX",
-                        color = if (state.hasValidGeminiKey && state.hasValidGitHubPat) NeonGreen else NeonAmber,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        style = MonospaceTypography
-                    )
+                    Row(modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Lock, contentDescription = "Knox", tint = if (state.hasValidGeminiKey) NeonGreen else NeonAmber, modifier = Modifier.size(13.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("KNOX", color = if (state.hasValidGeminiKey) NeonGreen else NeonAmber, fontSize = 10.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
+                    }
                 }
             }
         }
     }
 }
 
-// ====================================================================
-// Зона 2: Монолитный Квадрат (Оркестратор Gemini 3.8 Flash)
-// ====================================================================
+@Composable
+private fun DeepLogDialog(
+    logContent: String,
+    onDismiss: () -> Unit
+) {
+    val clipboardManager = LocalClipboardManager.current
+    val haptic = LocalHapticFeedback.current
+    val context = LocalContext.current
+    val scrollState = rememberScrollState()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0A0A0C),
+        shape = RoundedCornerShape(12.dp),
+        title = {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(NeonCyan))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("ЖУРНАЛ СЕССИИ (DEEP LOG)", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
+                }
+                IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = TextMuted, modifier = Modifier.size(16.dp))
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 280.dp, max = 560.dp)
+                    .background(Color(0xFF050506), RoundedCornerShape(8.dp))
+                    .border(1.dp, BorderDim, RoundedCornerShape(8.dp))
+                    .padding(12.dp)
+            ) {
+                SelectionContainer(modifier = Modifier.verticalScroll(scrollState)) {
+                    Text(
+                        text = logContent,
+                        color = Color(0xFFE2E8F0),
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp,
+                        style = MonospaceTypography
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        clipboardManager.setText(AnnotatedString(logContent))
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        Toast.makeText(context, "Лог скопирован в буфер", Toast.LENGTH_SHORT).show()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text("КОПИРОВАТЬ", color = NeonCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
+                }
+                Button(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text("ЗАКРЫТЬ", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
+                }
+            }
+        }
+    )
+}
 
 @Composable
 private fun OrchestratorMonolithCard(
     state: ConveyorScreenUiState,
-    onOpenReport: () -> Unit,
+    onOpenLog: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "ThinkingPulse")
-    val animatedGlowAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.4f,
-        targetValue = 0.95f,
-        animationSpec = infiniteRepeatable(tween(1100, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-        label = "GlowAlpha"
-    )
-
-    val isThinking = state.mission.currentPhase == OrchestratorPhase.REASONING_AND_PLANNING ||
-                     state.mission.currentPhase == OrchestratorPhase.EXECUTING_TOOL
-
-    val borderBrush = remember(isThinking, animatedGlowAlpha) {
-        if (isThinking) {
-            Brush.horizontalGradient(
-                listOf(NeonBlue.copy(alpha = animatedGlowAlpha), NeonCyan.copy(alpha = animatedGlowAlpha))
-            )
-        } else {
-            SolidColor(BorderDim)
-        }
-    }
-
     Card(
-        modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .border(1.dp, borderBrush, RoundedCornerShape(14.dp)),
+        modifier = modifier.clip(RoundedCornerShape(14.dp)).border(1.dp, BorderDim, RoundedCornerShape(14.dp)),
         colors = CardDefaults.cardColors(containerColor = MonolithBlack)
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    CanvasLedIndicator(color = if (isThinking) NeonBlue else NeonGreen, isPulsing = isThinking)
+                    CanvasLedIndicator(color = if (state.mission.isRunning) NeonBlue else NeonGreen, isPulsing = state.mission.isRunning)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "GEMINI 3.8 FLASH • ORCHESTRATOR",
-                        color = TextPrimary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Black,
-                        letterSpacing = 0.5.sp,
-                        style = MonospaceTypography
-                    )
+                    Text("GEMINI 3.8 FLASH • ORCHESTRATOR", color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Black, style = MonospaceTypography)
                 }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (state.mission.activeToolName != null) {
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFF1E293B),
-                            border = BorderStroke(0.5.dp, NeonCyan)
-                        ) {
-                            Text(
-                                text = "TOOL: ${state.mission.activeToolName}",
-                                color = NeonCyan,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                style = MonospaceTypography,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(6.dp))
-                    }
-
-                    Text(
-                        text = "[ШАГ ${state.mission.currentStep}/${state.mission.maxSteps}]",
-                        color = if (state.mission.currentStep > 0) NeonCyan else TextMuted,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        style = MonospaceTypography
-                    )
-                }
+                Text("[ШАГ ${state.mission.currentStep}/${state.mission.maxSteps}]", color = NeonCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
             }
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Текстовая область рассуждений
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 90.dp, max = 180.dp)
+                    .heightIn(min = 90.dp, max = 160.dp)
                     .background(Color(0xFF0A0C10), RoundedCornerShape(8.dp))
                     .border(0.5.dp, Color(0xFF1B202A), RoundedCornerShape(8.dp))
                     .padding(10.dp)
             ) {
-                val thoughtScrollState = rememberScrollState()
-                LaunchedEffect(state.mission.liveOrchestratorThought.length) {
-                    thoughtScrollState.scrollTo(thoughtScrollState.maxValue)
-                }
-
                 SelectionContainer {
                     Text(
-                        text = state.mission.liveOrchestratorThought.ifBlank {
-                            if (state.mission.isRunning) "Инициализация рассуждений и построение плана миссии..."
-                            else "Оркестратор находится в режиме ожидания. Введите задачу и нажмите Пуск."
-                        },
-                        color = if (isThinking) Color(0xFFE2E8F0) else TextMuted,
-                        fontSize = 12.sp,
-                        lineHeight = 17.sp,
-                        style = MonospaceTypography,
-                        modifier = Modifier.verticalScroll(thoughtScrollState)
+                        text = state.mission.liveOrchestratorThought.ifBlank { state.mission.statusMessage },
+                        color = Color(0xFFE2E8F0), fontSize = 11.sp, lineHeight = 16.sp, style = MonospaceTypography
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // КЛИКАБЕЛЬНАЯ СТРОКА СТАТУСА И ОТЧЕТА
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable { onOpenReport() }
-                    .padding(vertical = 2.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(text = state.mission.statusMessage, color = TextSecondary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MonospaceTypography, modifier = Modifier.weight(1f))
+                Surface(
+                    shape = RoundedCornerShape(4.dp), color = Color(0xFF16202E), border = BorderStroke(0.5.dp, NeonCyan),
+                    modifier = Modifier.clickable { onOpenLog() }
                 ) {
-                    Text(
-                        text = state.mission.statusMessage,
-                        color = when (state.mission.currentPhase) {
-                            OrchestratorPhase.FAILED -> NeonRed
-                            OrchestratorPhase.COMPLETED -> NeonGreen
-                            else -> TextSecondary
-                        },
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MonospaceTypography,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-
-                    Spacer(modifier = Modifier.width(6.dp))
-
-                    Surface(
-                        shape = RoundedCornerShape(4.dp),
-                        color = if (state.mission.currentPhase == OrchestratorPhase.COMPLETED) Color(0xFF0F2E1E) else Color(0xFF1A1E24),
-                        border = BorderStroke(0.5.dp, if (state.mission.currentPhase == OrchestratorPhase.COMPLETED) NeonGreen else BorderDim)
-                    ) {
-                        Text(
-                            text = "ОТЧЕТ ↗",
-                            color = if (state.mission.currentPhase == OrchestratorPhase.COMPLETED) NeonGreen else NeonCyan,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            style = MonospaceTypography,
-                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                        )
-                    }
-                }
-
-                if (state.mission.lastCommitSha != null) {
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "SHA: ${state.mission.lastCommitSha.take(7)}",
-                        color = NeonGreen,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        style = MonospaceTypography
-                    )
+                    Text("ЛОГ ↗", color = NeonCyan, fontSize = 9.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                 }
             }
         }
     }
 }
 
-// ====================================================================
-// Зона 3: Рандеву-Бар
-// ====================================================================
-
 @Composable
-private fun RendezvousBarrierBar(
-    state: ConveyorScreenUiState,
-    modifier: Modifier = Modifier
-) {
-    val isGreen = state.mission.isGreenLightOn
+private fun RendezvousBarrierBar(state: ConveyorScreenUiState, modifier: Modifier = Modifier) {
     val barrierTotal = state.mission.barrierTotal.coerceAtLeast(1)
     val remaining = state.mission.barrierRemaining
     val completed = (barrierTotal - remaining).coerceAtLeast(0)
     val progress = (completed.toFloat() / barrierTotal.toFloat()).coerceIn(0f, 1f)
 
-    val animatedProgress by animateFloatAsState(
-        targetValue = progress,
-        animationSpec = spring(stiffness = Spring.StiffnessLow),
-        label = "BarrierProgress"
-    )
-
-    Card(
-        modifier = modifier.clip(RoundedCornerShape(12.dp)),
-        colors = CardDefaults.cardColors(containerColor = SurfaceLight),
-        border = BorderStroke(1.dp, if (isGreen) NeonGreen.copy(alpha = 0.8f) else BorderDim)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(28.dp)
-                    .semantics { liveRegion = LiveRegionMode.Polite },
-                contentAlignment = Alignment.Center
-            ) {
-                CanvasMainGreenLamp(isIgnited = isGreen)
-            }
-
+    Card(modifier = modifier.clip(RoundedCornerShape(12.dp)), colors = CardDefaults.cardColors(containerColor = SurfaceLight), border = BorderStroke(1.dp, if (state.mission.isGreenLightOn) NeonGreen else BorderDim)) {
+        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            CanvasMainGreenLamp(isIgnited = state.mission.isGreenLightOn)
             Spacer(modifier = Modifier.width(12.dp))
-
             Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = if (isGreen) "🟢 ВСЕ БИЛДЕРЫ СДАЛИ ОТЧЕТЫ" else "ДИНАМИЧЕСКИЙ БАРЬЕР СИНХРОНИЗАЦИИ",
-                        color = if (isGreen) NeonGreen else TextPrimary,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.5.sp,
-                        style = MonospaceTypography
-                    )
-                    Text(
-                        text = "$completed / $barrierTotal",
-                        color = if (isGreen) NeonGreen else NeonCyan,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        style = MonospaceTypography
-                    )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(text = if (state.mission.isGreenLightOn) "🟢 ЗЕЛЕНАЯ ЛАМПОЧКА" else "РАНДЕВУ-БАРЬЕР", color = if (state.mission.isGreenLightOn) NeonGreen else TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
+                    Text(text = "$completed / $barrierTotal", color = NeonCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
                 }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                LinearProgressIndicator(
-                    progress = { animatedProgress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp)),
-                    color = if (isGreen) NeonGreen else NeonCyan,
-                    trackColor = Color(0xFF1E222A)
-                )
+                Spacer(modifier = Modifier.height(4.dp))
+                LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)), color = if (state.mission.isGreenLightOn) NeonGreen else NeonCyan, trackColor = Color(0xFF1E222A))
             }
         }
     }
 }
 
-// ====================================================================
-// Зона 4: Карточка Строителя
-// ====================================================================
-
 @Composable
-private fun BuilderCardItem(
-    card: BuilderCardUiModel,
-    isExpanded: Boolean,
-    onToggle: () -> Unit,
-    onCollapse: () -> Unit
-) {
+private fun BuilderCardItem(card: BuilderCardUiModel, isExpanded: Boolean, onToggle: () -> Unit, onCollapse: () -> Unit) {
     val isClassA = card.role == BuilderRole.PRIMARY_A
-    val cardBg = if (isClassA) CardClassA else CardClassB
-    val cardBorder = if (isExpanded) NeonCyan else if (isClassA) CardBorderA else CardBorderB
-
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .border(1.dp, cardBorder, RoundedCornerShape(10.dp))
-            .clickable { onToggle() }
-            .animateContentSize(spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessMediumLow)),
-        colors = CardDefaults.cardColors(containerColor = cardBg)
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).border(1.dp, if (isExpanded) NeonCyan else BorderDim, RoundedCornerShape(10.dp)).clickable { onToggle() },
+        colors = CardDefaults.cardColors(containerColor = if (isClassA) CardClassA else CardClassB)
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    val ledColor = when (card.status) {
-                        BuilderStatus.RUNNING -> NeonCyan
-                        BuilderStatus.SUCCESS -> NeonGreen
-                        BuilderStatus.FAILED, BuilderStatus.ABORTED_UPSTREAM_CORRUPTED -> NeonRed
-                        else -> LedDimGray
-                    }
-                    CanvasLedIndicator(color = ledColor, isPulsing = card.status == BuilderStatus.RUNNING)
+                    CanvasLedIndicator(color = if (card.status == BuilderStatus.SUCCESS) NeonGreen else NeonCyan, isPulsing = card.status == BuilderStatus.RUNNING)
                     Spacer(modifier = Modifier.width(6.dp))
-
-                    Text(
-                        text = if (isClassA) "АГЕНТ A${card.stageNumber}" else "АГЕНТ B${card.stageNumber}",
-                        color = if (isClassA) TextPrimary else Color(0xFF93C5FD),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        style = MonospaceTypography
-                    )
+                    Text(text = if (isClassA) "A${card.stageNumber}" else "B${card.stageNumber}", color = TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
                 }
-
-                Surface(
-                    shape = RoundedCornerShape(4.dp),
-                    color = Color.Black.copy(alpha = 0.4f)
-                ) {
-                    Text(
-                        text = card.status.name.take(7),
-                        color = when (card.status) {
-                            BuilderStatus.SUCCESS -> NeonGreen
-                            BuilderStatus.RUNNING -> NeonCyan
-                            BuilderStatus.FAILED -> NeonRed
-                            else -> TextMuted
-                        },
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        style = MonospaceTypography,
-                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                    )
-                }
+                Text(text = card.status.name.take(6), color = if (card.status == BuilderStatus.SUCCESS) NeonGreen else TextMuted, fontSize = 8.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
             }
-
             Spacer(modifier = Modifier.height(4.dp))
-
-            Text(
-                text = card.targetFile.substringAfterLast('/'),
-                color = TextSecondary,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                style = MonospaceTypography
-            )
-
-            if (isExpanded) {
-                Spacer(modifier = Modifier.height(10.dp))
-                HorizontalDivider(color = BorderDim, thickness = 0.5.dp)
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = "ПОЛНЫЙ ПУТЬ:",
-                    color = TextMuted,
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Bold,
-                    style = MonospaceTypography
-                )
-                Text(
-                    text = card.targetFile,
-                    color = TextPrimary,
-                    fontSize = 10.sp,
-                    style = MonospaceTypography
-                )
-
-                if (card.summary.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "ОТЧЕТ АГЕНТА:",
-                        color = TextMuted,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold,
-                        style = MonospaceTypography
-                    )
-                    Text(
-                        text = card.summary,
-                        color = Color(0xFFE2E8F0),
-                        fontSize = 10.sp,
-                        lineHeight = 14.sp,
-                        style = MonospaceTypography
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = Color(0xFF222630),
-                        border = BorderStroke(0.5.dp, BorderDim),
-                        modifier = Modifier.clickable { onCollapse() }
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Свернуть", tint = TextPrimary, modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "СВЕРНУТЬ",
-                                color = TextPrimary,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                style = MonospaceTypography
-                            )
-                        }
-                    }
-                }
-            }
+            Text(text = card.targetFile.substringAfterLast('/'), color = TextSecondary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MonospaceTypography)
         }
     }
 }
-
-// ====================================================================
-// Зона 5: Пост-Барьерная Консоль
-// ====================================================================
 
 @Composable
-private fun PostBarrierVerificationConsole(
-    state: ConveyorScreenUiState,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .border(1.dp, NeonGreen.copy(alpha = 0.5f), RoundedCornerShape(14.dp)),
-        colors = CardDefaults.cardColors(containerColor = MonolithBlack)
-    ) {
+private fun PostBarrierVerificationConsole(state: ConveyorScreenUiState, modifier: Modifier = Modifier) {
+    Card(modifier = modifier.clip(RoundedCornerShape(14.dp)).border(1.dp, NeonGreen.copy(alpha = 0.5f), RoundedCornerShape(14.dp)), colors = CardDefaults.cardColors(containerColor = MonolithBlack)) {
         Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.CheckCircle, contentDescription = "Verified", tint = NeonGreen, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "ДВУХКОНТУРНАЯ ВЕРИФИКАЦИЯ РЕЗУЛЬТАТА",
-                        color = NeonGreen,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        style = MonospaceTypography
-                    )
-                }
-
-                if (state.mission.ciStatus != null) {
-                    Text(
-                        text = "CI: ${state.mission.ciStatus?.uppercase()}",
-                        color = if (state.mission.ciConclusion == "success") NeonGreen else NeonCyan,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        style = MonospaceTypography
-                    )
-                }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.CheckCircle, contentDescription = "OK", tint = NeonGreen, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("ДВУХКОНТУРНАЯ ВЕРИФИКАЦИЯ", color = NeonGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
             }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Text(
-                text = "Все строители завершили сборку без конфликтов. " +
-                       "Локальная файловая система UFS 4.0 зафиксирована. Единый атомарный коммит направлен в ветку ${state.mission.targetBranch}.",
-                color = TextSecondary,
-                fontSize = 11.sp,
-                lineHeight = 16.sp,
-                style = MonospaceTypography
-            )
-
             if (state.mission.lastCommitSha != null) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = Color(0xFF0F172A),
-                    border = BorderStroke(0.5.dp, Color(0xFF1E293B)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "COMMIT: ${state.mission.lastCommitSha}",
-                        color = NeonCyan,
-                        fontSize = 10.sp,
-                        style = MonospaceTypography,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
-                    )
-                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Text("COMMIT: ${state.mission.lastCommitSha}", color = NeonCyan, fontSize = 10.sp, style = MonospaceTypography)
             }
         }
     }
 }
-
-// ====================================================================
-// Зона 6: Нижняя Капсула Управления
-// ====================================================================
 
 @Composable
 private fun MissionControlCapsule(
@@ -887,136 +462,51 @@ private fun MissionControlCapsule(
     onCollapseCard: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val isRunning = state.mission.isRunning
-
-    Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = Color(0xFF121418),
-        border = BorderStroke(1.dp, BorderDim),
-        shadowElevation = 12.dp,
-        modifier = modifier
-    ) {
+    Surface(shape = RoundedCornerShape(20.dp), color = Color(0xFF121418), border = BorderStroke(1.dp, BorderDim), shadowElevation = 12.dp, modifier = modifier) {
         Column(modifier = Modifier.padding(10.dp)) {
-            if (!isRunning) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+            if (!state.mission.isRunning) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Box(modifier = Modifier.weight(1.8f)) {
                         BasicTextField(
-                            value = state.repoInput,
-                            onValueChange = onRepoChanged,
-                            textStyle = TextStyle(color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace),
-                            singleLine = true,
-                            cursorBrush = SolidColor(NeonCyan),
-                            decorationBox = { innerTextField ->
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(Color(0xFF0A0C0E), RoundedCornerShape(8.dp))
-                                        .padding(horizontal = 10.dp, vertical = 7.dp)
-                                ) {
-                                    if (state.repoInput.isEmpty()) {
-                                        Text("owner/repository", color = TextMuted, fontSize = 12.sp, style = MonospaceTypography)
-                                    }
-                                    innerTextField()
-                                }
-                            }
+                            value = state.repoInput, onValueChange = onRepoChanged,
+                            textStyle = TextStyle(color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace), singleLine = true, cursorBrush = SolidColor(NeonCyan),
+                            decorationBox = { if (state.repoInput.isEmpty()) Text("owner/repo", color = TextMuted, fontSize = 12.sp, style = MonospaceTypography); it() }
                         )
                     }
-
                     Box(modifier = Modifier.weight(1f)) {
                         BasicTextField(
-                            value = state.branchInput,
-                            onValueChange = onBranchChanged,
-                            textStyle = TextStyle(color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace),
-                            singleLine = true,
-                            cursorBrush = SolidColor(NeonCyan),
-                            decorationBox = { innerTextField ->
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(Color(0xFF0A0C0E), RoundedCornerShape(8.dp))
-                                        .padding(horizontal = 10.dp, vertical = 7.dp)
-                                ) {
-                                    if (state.branchInput.isEmpty()) {
-                                        Text("branch", color = TextMuted, fontSize = 12.sp, style = MonospaceTypography)
-                                    }
-                                    innerTextField()
-                                }
-                            }
+                            value = state.branchInput, onValueChange = onBranchChanged,
+                            textStyle = TextStyle(color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace), singleLine = true, cursorBrush = SolidColor(NeonCyan),
+                            decorationBox = { if (state.branchInput.isEmpty()) Text("branch", color = TextMuted, fontSize = 12.sp, style = MonospaceTypography); it() }
                         )
                     }
                 }
                 Spacer(modifier = Modifier.height(6.dp))
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .background(Color(0xFF0A0C0E), RoundedCornerShape(12.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                ) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.weight(1f).background(Color(0xFF0A0C0E), RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 8.dp)) {
                     if (state.objectiveInput.isEmpty()) {
-                        Text(
-                            text = if (isRunning) "Миссия выполняется..." else "Опишите задачу (Ctrl+Enter для старта)...",
-                            color = TextMuted,
-                            fontSize = 12.sp,
-                            style = MonospaceTypography
-                        )
+                        Text(if (state.mission.isRunning) "Выполняется..." else "Задача для Конвейера...", color = TextMuted, fontSize = 12.sp, style = MonospaceTypography)
                     }
-
                     BasicTextField(
-                        value = state.objectiveInput,
-                        onValueChange = onObjectiveChanged,
-                        enabled = !isRunning,
-                        textStyle = TextStyle(color = TextPrimary, fontSize = 12.sp, lineHeight = 16.sp, fontFamily = FontFamily.Monospace),
-                        maxLines = 4,
-                        cursorBrush = SolidColor(Color.White),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(onSend = { if (!isRunning) onStart() }),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .onPreviewKeyEvent { event ->
-                                if (event.type == KeyEventType.KeyDown) {
-                                    if (event.key == Key.Escape) {
-                                        onCollapseCard()
-                                        true
-                                    } else if ((event.isCtrlPressed || event.isMetaPressed) && (event.key == Key.Enter || event.key == Key.NumPadEnter)) {
-                                        if (!isRunning) onStart()
-                                        true
-                                    } else false
-                                } else false
-                            }
+                        value = state.objectiveInput, onValueChange = onObjectiveChanged, enabled = !state.mission.isRunning,
+                        textStyle = TextStyle(color = TextPrimary, fontSize = 12.sp, lineHeight = 16.sp, fontFamily = FontFamily.Monospace), maxLines = 4, cursorBrush = SolidColor(Color.White),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send), keyboardActions = KeyboardActions(onSend = { if (!state.mission.isRunning) onStart() }),
+                        modifier = Modifier.fillMaxWidth().onPreviewKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && (event.isCtrlPressed || event.isMetaPressed) && (event.key == Key.Enter || event.key == Key.NumPadEnter)) {
+                                if (!state.mission.isRunning) onStart(); true
+                            } else false
+                        }
                     )
                 }
-
                 Spacer(modifier = Modifier.width(8.dp))
-
-                if (isRunning) {
-                    Button(
-                        onClick = onCancel,
-                        colors = ButtonDefaults.buttonColors(containerColor = NeonRed),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
-                    ) {
-                        Icon(Icons.Default.Close, contentDescription = "Стоп", tint = Color.White, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
+                if (state.mission.isRunning) {
+                    Button(onClick = onCancel, colors = ButtonDefaults.buttonColors(containerColor = NeonRed), shape = RoundedCornerShape(12.dp), contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)) {
                         Text("СТОП", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
                     }
                 } else {
-                    Button(
-                        onClick = onStart,
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.White),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
-                    ) {
-                        Icon(Icons.Default.PlayArrow, contentDescription = "Старт", tint = Color.Black, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
+                    Button(onClick = onStart, colors = ButtonDefaults.buttonColors(containerColor = Color.White), shape = RoundedCornerShape(12.dp), contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)) {
                         Text("ПУСК", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
                     }
                 }
@@ -1025,298 +515,59 @@ private fun MissionControlCapsule(
     }
 }
 
-// ====================================================================
-// Графика Canvas: Аппаратные Светодиоды
-// ====================================================================
-
 @Composable
-private fun CanvasLedIndicator(
-    color: Color,
-    isPulsing: Boolean = false,
-    modifier: Modifier = Modifier.size(12.dp)
-) {
-    val infiniteTransition = rememberInfiniteTransition(label = "LedPulse")
-    val animatedAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.4f,
-        targetValue = 1.0f,
-        animationSpec = infiniteRepeatable(tween(700, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-        label = "LedAlpha"
-    )
-
-    val currentAlpha = if (isPulsing) animatedAlpha else 1.0f
-
+private fun CanvasLedIndicator(color: Color, isPulsing: Boolean = false, modifier: Modifier = Modifier.size(10.dp)) {
+    val infiniteTransition = rememberInfiniteTransition(label = "Led")
+    val alpha by infiniteTransition.animateFloat(initialValue = 0.4f, targetValue = 1f, animationSpec = infiniteRepeatable(tween(700, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "A")
+    val currentAlpha = if (isPulsing) alpha else 1f
     Canvas(modifier = modifier) {
-        val radius = size.minDimension / 2f
         val centerOffset = Offset(size.width / 2f, size.height / 2f)
-
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(color.copy(alpha = 0.6f * currentAlpha), color.copy(alpha = 0f)),
-                center = centerOffset,
-                radius = radius
-            ),
-            radius = radius,
-            center = centerOffset
-        )
-
-        drawCircle(
-            color = color.copy(alpha = currentAlpha),
-            radius = radius * 0.45f,
-            center = centerOffset
-        )
+        drawCircle(color = color.copy(alpha = currentAlpha), radius = size.minDimension / 2f, center = centerOffset)
     }
 }
 
 @Composable
 private fun CanvasMainGreenLamp(isIgnited: Boolean) {
-    val infiniteTransition = rememberInfiniteTransition(label = "MainLampPulse")
-    val animatedGlow by infiniteTransition.animateFloat(
-        initialValue = 0.6f,
-        targetValue = 1.0f,
-        animationSpec = infiniteRepeatable(tween(900, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-        label = "LampGlow"
-    )
-
-    val baseColor = if (isIgnited) NeonGreen else LedDimGray
-    val alpha = if (isIgnited) animatedGlow else 0.4f
-
-    Canvas(modifier = Modifier.fillMaxSize()) {
-        val radius = size.minDimension / 2f
+    Canvas(modifier = Modifier.size(24.dp)) {
         val centerOffset = Offset(size.width / 2f, size.height / 2f)
-
-        if (isIgnited) {
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(NeonGreen.copy(alpha = 0.8f * alpha), NeonGreen.copy(alpha = 0f)),
-                    center = centerOffset,
-                    radius = radius
-                ),
-                radius = radius,
-                center = centerOffset
-            )
-        }
-
-        drawCircle(
-            color = baseColor.copy(alpha = if (isIgnited) 1f else 0.5f),
-            radius = radius * 0.45f,
-            center = centerOffset
-        )
+        drawCircle(color = if (isIgnited) NeonGreen else LedDimGray, radius = size.minDimension / 2f, center = centerOffset)
     }
-}
-
-// ====================================================================
-// Вспомогательные Диалоги (Отчет, Placeholder, Knox, Ошибки)
-// ====================================================================
-
-@Composable
-private fun MissionReportDialog(
-    title: String,
-    content: String,
-    onDismiss: () -> Unit
-) {
-    val clipboardManager = LocalClipboardManager.current
-    val haptic = LocalHapticFeedback.current
-    val context = LocalContext.current
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xFF101216),
-        shape = RoundedCornerShape(16.dp),
-        title = {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = title,
-                    color = NeonGreen,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    style = MonospaceTypography
-                )
-                IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = TextMuted, modifier = Modifier.size(18.dp))
-                }
-            }
-        },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 150.dp, max = 460.dp)
-                    .background(Color(0xFF07080A), RoundedCornerShape(10.dp))
-                    .border(1.dp, BorderDim, RoundedCornerShape(10.dp))
-                    .padding(12.dp)
-            ) {
-                val scrollState = rememberScrollState()
-                SelectionContainer(modifier = Modifier.verticalScroll(scrollState)) {
-                    StreamingMarkdownContent(
-                        text = content,
-                        onOpenUrl = { /* URL открываются при необходимости */ }
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = {
-                        clipboardManager.setText(AnnotatedString(content))
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        Toast.makeText(context, "Отчет скопирован в буфер", Toast.LENGTH_SHORT).show()
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Icon(Icons.Default.Share, contentDescription = "Копировать", tint = NeonCyan, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("КОПИРОВАТЬ", color = NeonCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
-                }
-
-                Button(
-                    onClick = onDismiss,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.White),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text("ЗАКРЫТЬ", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
-                }
-            }
-        }
-    )
 }
 
 @Composable
 private fun EmptySwarmPlaceholder(isRunning: Boolean) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(110.dp)
-            .padding(horizontal = 14.dp)
-            .background(SurfaceDark, RoundedCornerShape(10.dp))
-            .border(1.dp, BorderDim, RoundedCornerShape(10.dp)),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = if (isRunning) "Оркестратор подготавливает и распределяет задачи роя..."
-                   else "Рой из 20 строителей (10 A + 10 B) появится здесь после старта миссии.",
-            color = TextMuted,
-            fontSize = 11.sp,
-            style = MonospaceTypography
-        )
+    Box(modifier = Modifier.fillMaxWidth().height(80.dp).padding(horizontal = 14.dp).background(SurfaceDark, RoundedCornerShape(10.dp)).border(1.dp, BorderDim, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+        Text(text = if (isRunning) "Оркестратор координирует задачи..." else "Рой строителей активируется при масштабных задачах.", color = TextMuted, fontSize = 11.sp, style = MonospaceTypography)
     }
 }
 
 @Composable
 private fun ErrorBannerCard(errorMessage: String, onDismiss: () -> Unit) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 4.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF2E1215)),
-        border = BorderStroke(1.dp, NeonRed.copy(alpha = 0.6f))
-    ) {
-        Row(
-            modifier = Modifier.padding(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                text = errorMessage,
-                color = Color(0xFFFFB4AB),
-                fontSize = 11.sp,
-                style = MonospaceTypography,
-                modifier = Modifier.weight(1f)
-            )
+    Card(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF2E1215)), border = BorderStroke(1.dp, NeonRed.copy(alpha = 0.6f))) {
+        Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(text = errorMessage, color = Color(0xFFFFB4AB), fontSize = 11.sp, style = MonospaceTypography, modifier = Modifier.weight(1f))
             IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = NeonRed, modifier = Modifier.size(14.dp))
+                Icon(Icons.Default.Close, contentDescription = "X", tint = NeonRed, modifier = Modifier.size(14.dp))
             }
         }
     }
 }
 
 @Composable
-private fun KnoxVaultSettingsDialog(
-    currentGeminiKey: String,
-    currentGitHubPat: String,
-    onSave: (String, String) -> Unit,
-    onDismiss: () -> Unit
-) {
+private fun KnoxVaultSettingsDialog(currentGeminiKey: String, currentGitHubPat: String, onSave: (String, String) -> Unit, onDismiss: () -> Unit) {
     var geminiKey by remember { mutableStateOf("") }
     var githubPat by remember { mutableStateOf("") }
-    val hasGemini = currentGeminiKey.isNotBlank() && currentGeminiKey != "******"
-    val hasGitHub = currentGitHubPat.isNotBlank() && currentGitHubPat != "******"
-
     AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xFF121418),
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Lock, contentDescription = "Knox", tint = NeonGreen, modifier = Modifier.size(20.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Samsung Knox Vault", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
-            }
-        },
+        onDismissRequest = onDismiss, containerColor = Color(0xFF121418),
+        title = { Text("Samsung Knox Vault", color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography) },
         text = {
             Column {
-                Text(
-                    text = "Ключи шифруются аппаратно (AES-256-GCM). Если ключ уже сохранен, оставьте поле пустым — оно не будет затерто.",
-                    color = TextSecondary,
-                    fontSize = 11.sp,
-                    lineHeight = 15.sp,
-                    style = MonospaceTypography
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-
-                OutlinedTextField(
-                    value = geminiKey,
-                    onValueChange = { geminiKey = it },
-                    label = { 
-                        Text(
-                            text = if (hasGemini) "Gemini Key: $currentGeminiKey (сохранен)" else "Введите Gemini API Key",
-                            color = if (hasGemini) NeonGreen else TextSecondary,
-                            fontSize = 10.sp
-                        ) 
-                    },
-                    placeholder = { Text("Вставьте новый ключ для замены", fontSize = 11.sp, color = TextMuted) },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    textStyle = TextStyle(color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace),
-                    modifier = Modifier.fillMaxWidth()
-                )
-
+                OutlinedTextField(value = geminiKey, onValueChange = { geminiKey = it }, label = { Text("Gemini API Key") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
                 Spacer(modifier = Modifier.height(8.dp))
-
-                OutlinedTextField(
-                    value = githubPat,
-                    onValueChange = { githubPat = it },
-                    label = { 
-                        Text(
-                            text = if (hasGitHub) "GitHub PAT: $currentGitHubPat (сохранен)" else "Введите GitHub PAT (ghp_...)",
-                            color = if (hasGitHub) NeonGreen else TextSecondary,
-                            fontSize = 10.sp
-                        ) 
-                    },
-                    placeholder = { Text("Вставьте новый токен для замены", fontSize = 11.sp, color = TextMuted) },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    textStyle = TextStyle(color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace),
-                    modifier = Modifier.fillMaxWidth()
-                )
+                OutlinedTextField(value = githubPat, onValueChange = { githubPat = it }, label = { Text("GitHub PAT") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
             }
         },
-        confirmButton = {
-            Button(
-                onClick = { onSave(geminiKey, githubPat) },
-                colors = ButtonDefaults.buttonColors(containerColor = Color.White)
-            ) {
-                Text("СОХРАНИТЬ", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("ОТМЕНА", color = TextSecondary, fontSize = 11.sp, style = MonospaceTypography)
-            }
-        }
+        confirmButton = { Button(onClick = { onSave(geminiKey, githubPat) }) { Text("СОХРАНИТЬ") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("ОТМЕНА") } }
     )
 }
