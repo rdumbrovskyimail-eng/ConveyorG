@@ -895,17 +895,20 @@ class AutonomousOrchestrator(
 
         val sanitizedHistory = sanitizeHistoryForWire(history)
 
-        // Google Search активен непрерывно: если есть инструменты, Google Search гарантированно включается в массив tools
+        // Типобезопасное формирование массива tools без вызова builder-инференса
         val hasTools = !toolDeclarations.functionDeclarations.isNullOrEmpty() || toolDeclarations.googleSearch != null
-        val wireTools = if (hasTools) {
-            buildList {
-                val searchMap = toolDeclarations.googleSearch ?: emptyMap()
-                add(GeminiToolDto(googleSearch = searchMap))
-                if (!toolDeclarations.functionDeclarations.isNullOrEmpty()) {
-                    add(GeminiToolDto(functionDeclarations = toolDeclarations.functionDeclarations))
-                }
+        val wireTools: List<GeminiToolDto>? = if (hasTools) {
+            val list = ArrayList<GeminiToolDto>()
+            if (toolDeclarations.googleSearch != null) {
+                list.add(GeminiToolDto(googleSearch = toolDeclarations.googleSearch))
             }
-        } else null
+            if (!toolDeclarations.functionDeclarations.isNullOrEmpty()) {
+                list.add(GeminiToolDto(functionDeclarations = toolDeclarations.functionDeclarations))
+            }
+            if (list.isNotEmpty()) list else null
+        } else {
+            null
+        }
 
         val requestPayload = AgentWireRequest(
             cachedContent = cachedContentId,
