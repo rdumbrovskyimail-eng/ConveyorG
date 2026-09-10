@@ -118,7 +118,7 @@ class AutonomousConveyorController(
                         currentPhase = OrchestratorPhase.INITIALIZING_WORKSPACE,
                         maxSteps = maxSteps,
                         maxRepairRounds = maxRepairRounds,
-                        statusMessage = "Запуск конвейера (Этапы 1-5)..."
+                        statusMessage = "Запуск конвейера..."
                     )
                 }
 
@@ -174,7 +174,8 @@ class AutonomousConveyorController(
                 maxRepairRounds = maxRepairRounds,
                 existingWorkspaceManager = workspaceManager,
                 existingGitHubEngine = gitHubEngine,
-                existingToolBridge = compositeBridge
+                existingToolBridge = compositeBridge,
+                existingSwarmCoordinator = swarmCoordinator // Прямая передача координатора роя
             )
 
             orchestratorObserverJob.cancel()
@@ -265,7 +266,7 @@ class AutonomousConveyorController(
                 }
                 is SwarmEvent.GreenLightIgnited -> {
                     _uiState.update {
-                        it.copy(isGreenLightOn = true, statusMessage = "🟢 ЗЕЛЕНАЯ ЛАМПОЧКА! Все отчеты роя получены.")
+                        it.copy(isGreenLightOn = true, statusMessage = "🟢 ЗЕЛЕНАЯ ЛАМПОЧКА! Все файлы зафиксированы.")
                     }
                     _uiEvents.emit(ConveyorMissionUiEvent.HapticTrigger(isStrong = true))
                     _uiEvents.emit(ConveyorMissionUiEvent.GreenLightIgnited(event.manifest.totalCompleted, event.manifest.totalDurationMs))
@@ -378,7 +379,7 @@ class AutonomousConveyorController(
 class CompositeOrchestratorToolBridge(
     workspaceManager: LocalWorkspaceManager,
     gitHubEngine: GitHubEngine,
-    private val swarmCoordinator: BuilderSwarmCoordinator
+    val swarmCoordinator: BuilderSwarmCoordinator
 ) : OrchestratorBridge {
 
     private val baseBridge = OrchestratorToolBridge(workspaceManager, gitHubEngine)
@@ -427,7 +428,7 @@ class CompositeOrchestratorToolBridge(
             )
         )
         return GeminiToolDto(
-            googleSearch = emptyMap(), // Поиск Google активен для композитного моста на всех шагах билдинга
+            googleSearch = emptyMap(),
             functionDeclarations = baseDeclarations + swarmDeclarations
         )
     }
