@@ -36,13 +36,14 @@ import kotlin.random.Random
 enum class OrchestratorPhase {
     IDLE,
     INITIALIZING_WORKSPACE,
-    RECONNAISSANCE_T0,        // Этап 1: Сетевой рентген топологии GitHub API (LOW)
-    FEASIBILITY_GATE_STAGE2,  // Этап 2: Семантический шлюз Истина / Ложь (HIGH)
-    PHYSICAL_DEPLOY_STAGE3,   // Этап 3: Деплой архива на UFS 4.0, НЕ ЧИТАТЬ! (LOW)
-    CODEBASE_AUDIT_STAGE4,    // Этап 4: Залповый беспристрастный аудит файлов (HIGH)
-    RESEARCH_STAGE_5A,        // Этап 5a: Глубокое изучение 100 первоисточников (HIGH)
-    RESEARCH_STAGE_5B,        // Этап 5b: Изучение 100 иных первоисточников (HIGH)
-    RESEARCH_STAGE_5C,        // Этап 5c: Изучение 100 иных первоисточников, волна 3 (HIGH)
+    RECONNAISSANCE_T0,          // Этап 1: Сетевой рентген топологии GitHub API (LOW)
+    FEASIBILITY_GATE_STAGE2,    // Этап 2: Семантический шлюз Истина / Ложь (HIGH)
+    PHYSICAL_DEPLOY_STAGE3,     // Этап 3: Деплой архива на UFS 4.0, НЕ ЧИТАТЬ! (LOW)
+    CODEBASE_AUDIT_STAGE4,      // Этап 4: Залповый беспристрастный аудит файлов (HIGH)
+    RESEARCH_STAGE_5A,          // Этап 5a: Глубокое изучение 100 первоисточников (HIGH)
+    RESEARCH_STAGE_5B,          // Этап 5b: Изучение 100 иных первоисточников (HIGH)
+    RESEARCH_STAGE_5C,          // Этап 5c: Изучение 100 иных первоисточников, волна 3 (HIGH)
+    STRATEGY_SELECTION_STAGE6,  // Этап 6: Стратегический выбор одного из 3 режимов (HIGH)
     REASONING_AND_PLANNING,
     EXECUTING_TOOL,
     AWAITING_BARRIER,
@@ -53,6 +54,18 @@ enum class OrchestratorPhase {
     FAILED,
     CANCELLED
 }
+
+enum class ConveyorExecutionMode(val code: Int, val description: String) {
+    NEW_FILES_ONLY(1, "Только написание новых файлов"),
+    EDIT_EXISTING_ONLY(2, "Только редактирование существующих файлов"),
+    FULL_HYBRID(3, "Общий режим (новые файлы + редактирование существующих)")
+}
+
+data class Stage6StrategyResult(
+    val selectedMode: ConveyorExecutionMode,
+    val decisionExplanation: String,
+    val logFormattedEntry: String
+)
 
 data class OrchestratorState(
     val phase: OrchestratorPhase = OrchestratorPhase.IDLE,
@@ -66,6 +79,7 @@ data class OrchestratorState(
     val barrierTotal: Int = 0,
     val barrierRemaining: Int = 0,
     val isGreenLightOn: Boolean = false,
+    val executionMode: ConveyorExecutionMode? = null,
     val lastCommitSha: String? = null,
     val lastCiRunId: Long? = null,
     val ciStatus: String? = null,
@@ -217,6 +231,9 @@ class AutonomousOrchestrator(
         private const val PROMPT_STAGE_5B = "изучи 100 иных первоисточников в интернете, по данным запроса клиента, и кодовой базы проекта. Данные запиши в лог и запомни."
         private const val PROMPT_STAGE_5C = "изучи 100 иных первоисточников в интернете, по данным запроса клиента, и кодовой базы проекта. Данные запиши в лог и запомни."
 
+        // ЖЕЛЕЗНЫЙ ЭТАЛОННЫЙ ПРОМПТ ЭТАПА 6:
+        private const val PROMPT_STAGE_6 = "У тебя есть анализ Репозитория, анализ запроса клиента, и анализ 300 источников. Подумай хорошо, и выбери один из трех доступных тебе режимов: 1. Только написание новых файлов. (Ты в дальнейшем этапе, будешь писать только полные новые файлы в репозиторий). 2. Только Редактирование репозитория и его файлов. Ты не будешь писать новые полные файлы, а только будешь вносить изменение в существующие. 3. Общий режим. Написание новых файлов, и редактироваеие существующих. Полный доступ."
+
         @OptIn(ExperimentalSerializationApi::class)
         private val json = Json {
             ignoreUnknownKeys = true
@@ -332,7 +349,7 @@ class AutonomousOrchestrator(
                 }
                 _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.PHYSICAL_DEPLOY_STAGE3, "Этап 3: Физический деплой"))
 
-                // Устранение Коллизии 2: проверка пустоты песочницы вместо existingWorkspaceManager
+                // Проверка пустоты песочницы UFS 4.0
                 if (!isRemoteEmpty && workspaceManager.isWorkspaceEmpty()) {
                     gitHubEngine.downloadAndUnpackZipball(owner, repo, branch, workspaceManager.workspaceRoot)
                 }
@@ -360,7 +377,7 @@ class AutonomousOrchestrator(
                 val allFilesBundle = workspaceManager.collectAllTextFilesForAudit()
                 val codebaseBundleString = buildCodebaseXmlPayload(allFilesBundle)
 
-                // Устранение Коллизии 3: фиксация бандла в TPU Context Cache при размере >= 120 000 символов
+                // Фиксация в TPU Context Cache при размере кодовой базы >= 120 000 символов
                 if (codebaseBundleString.length >= 120_000) {
                     pinnedCacheId = pinCodebaseContextCache(codebaseBundleString)
                 }
@@ -381,7 +398,36 @@ class AutonomousOrchestrator(
                 )
 
                 // ====================================================================
-                // ПЕРЕХОД К ПЛАНИРОВАНИЮ И РЕАЛИЗАЦИИ
+                // ЭТАП 6: СТРАТЕГИЧЕСКИЙ ВЫБОР РЕЖИМА ИСПОЛНЕНИЯ (РЕЖИМ HIGH)
+                // ====================================================================
+                _state.update {
+                    it.copy(
+                        phase = OrchestratorPhase.STRATEGY_SELECTION_STAGE6,
+                        statusMessage = "Этап 6: Архитектурный выбор генерального режима (HIGH)..."
+                    )
+                }
+                _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.STRATEGY_SELECTION_STAGE6, "Этап 6: Выбор режима исполнения"))
+
+                val stage6Strategy = executeStage6StrategySelection(
+                    owner = owner,
+                    repo = repo,
+                    branch = branch,
+                    userObjective = userObjective,
+                    auditReport = auditReportText,
+                    stage5Research = stage5ResearchLog,
+                    cachedContentId = pinnedCacheId
+                )
+                appendDeepLog(stage6Strategy.logFormattedEntry)
+
+                _state.update {
+                    it.copy(
+                        executionMode = stage6Strategy.selectedMode,
+                        statusMessage = "Выбран режим: ${stage6Strategy.selectedMode.description}. Переход к Этапу 7..."
+                    )
+                }
+
+                // ====================================================================
+                // ПЕРЕХОД К ЭТАПУ 7 (ПЛАНИРОВАНИЕ И РЕАЛИЗАЦИЯ)
                 // ====================================================================
                 val systemPrompt = buildSystemInstruction(owner, repo, branch)
                 val conversationHistory = mutableListOf<AgentContentDto>()
@@ -397,7 +443,8 @@ class AutonomousOrchestrator(
                                     t0Passport = t0PassportText,
                                     stage2Result = stage2Result,
                                     auditReport = auditReportText,
-                                    stage5Research = stage5ResearchLog
+                                    stage5Research = stage5ResearchLog,
+                                    strategyResult = stage6Strategy
                                 )
                             )
                         )
@@ -407,7 +454,7 @@ class AutonomousOrchestrator(
                 _state.update {
                     it.copy(
                         phase = OrchestratorPhase.REASONING_AND_PLANNING,
-                        statusMessage = "Исследование 300 источников завершено. Планирование реализации..."
+                        statusMessage = "Шлюз к Этапу 7 открыт. Стратегия: ${stage6Strategy.selectedMode.description}. Реализация..."
                     )
                 }
 
@@ -809,6 +856,68 @@ class AutonomousOrchestrator(
         return "$entry5a\n\n$entry5b\n\n$entry5c"
     }
 
+    // ====================================================================
+    // ЭТАП 6: СТРАТЕГИЧЕСКИЙ ВЫБОР РЕЖИМА ИСПОЛНЕНИЯ (РЕЖИМ HIGH)
+    // ====================================================================
+    private suspend fun executeStage6StrategySelection(
+        owner: String,
+        repo: String,
+        branch: String,
+        userObjective: String,
+        auditReport: String,
+        stage5Research: String,
+        cachedContentId: String?
+    ): Stage6StrategyResult {
+        val strategySystemPrompt = "Ты — верховный технический архитектор проекта ClientG.\n" +
+                "Твоя задача — на основе синтеза всех проведенных исследований принять стратегическое архитектурное решение о режиме выполнения миссии для Этапа 7.\n" +
+                "Репозиторий: '$owner/$repo' ($branch).\n" +
+                "Задача клиента: $userObjective\n\n" +
+                "АУДИТ КОДОВОЙ БАЗЫ:\n$auditReport\n\n" +
+                "РЕЗУЛЬТАТЫ ИССЛЕДОВАНИЯ 300 ИСТОЧНИКОВ:\n$stage5Research"
+
+        val history = listOf(
+            AgentContentDto(
+                role = "user",
+                parts = listOf(AgentPartDto(text = PROMPT_STAGE_6))
+            )
+        )
+
+        val turn = executeSingleGeminiTurn(
+            systemPrompt = strategySystemPrompt,
+            history = history,
+            toolDeclarations = GeminiToolDto(functionDeclarations = emptyList()),
+            thinkingLevel = "HIGH",
+            cachedContentId = cachedContentId
+        )
+
+        val rawText = turn.parts.filter { it.thought != true }.mapNotNull { it.text }.joinToString("\n").trim()
+
+        // Детерминированный парсинг выбранного режима
+        val selectedMode = when {
+            rawText.contains("1") || rawText.contains("Только написание новых файлов", ignoreCase = true) ->
+                ConveyorExecutionMode.NEW_FILES_ONLY
+            rawText.contains("2") || rawText.contains("Только Редактирование", ignoreCase = true) ->
+                ConveyorExecutionMode.EDIT_EXISTING_ONLY
+            else ->
+                ConveyorExecutionMode.FULL_HYBRID
+        }
+
+        val logEntry = buildString {
+            appendLine("=== [ЭТАП 6: СТРАТЕГИЧЕСКИЙ ВЫБОР РЕЖИМА ИСПОЛНЕНИЯ] ===")
+            appendLine("• ВЕРДИКТ АРХИТЕКТОРА: РЕЖИМ ${selectedMode.code} — ${selectedMode.description}")
+            appendLine("• АНАЛИТИЧЕСКОЕ ОБОСНОВАНИЕ:")
+            appendLine(rawText.ifBlank { "Режим ${selectedMode.code} выбран на основе комплексного анализа кодовой базы и 300 источников." })
+            appendLine("• ШЛЮЗ К ЭТАПУ 7 ОТКРЫТ: Директивы переданы в генеральный контур разработки.")
+            append("=======================================================")
+        }
+
+        return Stage6StrategyResult(
+            selectedMode = selectedMode,
+            decisionExplanation = rawText,
+            logFormattedEntry = logEntry
+        )
+    }
+
     private fun appendDeepLog(text: String) {
         val timestamped = "\n\n$text"
         _state.update { it.copy(deepInvestigationLog = it.deepInvestigationLog + timestamped) }
@@ -895,7 +1004,7 @@ class AutonomousOrchestrator(
 
         val sanitizedHistory = sanitizeHistoryForWire(history)
 
-        // Типобезопасное формирование массива tools без вызова builder-инференса
+        // Типобезопасное формирование инструментов: Google Search + Function Declarations
         val hasTools = !toolDeclarations.functionDeclarations.isNullOrEmpty() || toolDeclarations.googleSearch != null
         val wireTools: List<GeminiToolDto>? = if (hasTools) {
             val list = ArrayList<GeminiToolDto>()
@@ -1072,14 +1181,17 @@ class AutonomousOrchestrator(
         t0Passport: String,
         stage2Result: Stage2FeasibilityResult,
         auditReport: String,
-        stage5Research: String
+        stage5Research: String,
+        strategyResult: Stage6StrategyResult
     ): String {
         return "$t0Passport\n\n" +
                "${stage2Result.logFormattedEntry}\n\n" +
                "$auditReport\n\n" +
                "$stage5Research\n\n" +
+               "${strategyResult.logFormattedEntry}\n\n" +
                "ЦЕЛЕВАЯ ЗАДАЧА КЛИЕНТА:\n$objective\n\n" +
-               "Файлов в репозитории: $totalFiles. Кодовая база и 300 первоисточников изучены и зафиксированы. Приступай к планированию и реализации."
+               "ДИРЕКТИВА ЭТАПА 7: Действуй строго в рамках РЕЖИМА ${strategyResult.selectedMode.code} (${strategyResult.selectedMode.description}). " +
+               "Файлов в репозитории: $totalFiles. Кодовая база, 300 первоисточников и стратегия зафиксированы. Приступай к планированию и реализации."
     }
 
     fun cancelTask() {
