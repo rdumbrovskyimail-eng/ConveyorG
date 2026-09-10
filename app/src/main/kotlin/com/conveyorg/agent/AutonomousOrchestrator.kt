@@ -26,8 +26,10 @@ import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
+import java.io.BufferedOutputStream
 import java.io.Closeable
 import java.io.File
+import java.io.FileOutputStream
 import java.util.UUID
 import kotlin.math.min
 import kotlin.math.pow
@@ -43,7 +45,9 @@ enum class OrchestratorPhase {
     RESEARCH_STAGE_5A,          // Этап 5a: Глубокое изучение 100 первоисточников (HIGH)
     RESEARCH_STAGE_5B,          // Этап 5b: Изучение 100 иных первоисточников (HIGH)
     RESEARCH_STAGE_5C,          // Этап 5c: Изучение 100 иных первоисточников, волна 3 (HIGH)
-    STRATEGY_SELECTION_STAGE6,  // Этап 6: Стратегический выбор одного из 3 режимов (HIGH)
+    STRATEGY_SELECTION_STAGE6,  // Этап 6: Стратегический выбор режима исполнения (HIGH)
+    STREAM_GENERATION_STAGE7,   // Этап 7: Монолитный непрерывный генератор кода (266k волны)
+    CONVEYOR_SELECTION_STAGE8,  // Этап 8: Подготовка монолита к селекции и распределению
     REASONING_AND_PLANNING,
     EXECUTING_TOOL,
     AWAITING_BARRIER,
@@ -64,6 +68,14 @@ enum class ConveyorExecutionMode(val code: Int, val description: String) {
 data class Stage6StrategyResult(
     val selectedMode: ConveyorExecutionMode,
     val decisionExplanation: String,
+    val logFormattedEntry: String
+)
+
+data class Stage7MonolithResult(
+    val isSuccess: Boolean,
+    val totalChars: Long,
+    val wavesCount: Int,
+    val monolithFile: File,
     val logFormattedEntry: String
 )
 
@@ -226,6 +238,10 @@ class AutonomousOrchestrator(
         private const val BASELINE_BACKOFF_MS = 1500L
         private const val MAX_BACKOFF_MS = 16000L
 
+        // ЖЕЛЕЗНАЯ КАЛИБРОВКА ПОТОКА ЭТАПА 7:
+        private const val CONVEYOR_STREAM_CHAR_LIMIT = 266_000
+        private const val MAX_STREAM_WAVES = 8
+
         // ЖЕЛЕЗНЫЕ ЭТАЛОННЫЕ ПРОМПТЫ ЭТАПА 5 (НЕ ИЗМЕНЯТЬ НИ ОДНОГО СИМВОЛА):
         private const val PROMPT_STAGE_5A = "Проанализируй и максимально глубоко изучи 100 первоисточников в интернете, по данным запроса клиента, и кодовой базы проекта. Данные запиши в лог и запомни."
         private const val PROMPT_STAGE_5B = "изучи 100 иных первоисточников в интернете, по данным запроса клиента, и кодовой базы проекта. Данные запиши в лог и запомни."
@@ -233,6 +249,12 @@ class AutonomousOrchestrator(
 
         // ЖЕЛЕЗНЫЙ ЭТАЛОННЫЙ ПРОМПТ ЭТАПА 6:
         private const val PROMPT_STAGE_6 = "У тебя есть анализ Репозитория, анализ запроса клиента, и анализ 300 источников. Подумай хорошо, и выбери один из трех доступных тебе режимов: 1. Только написание новых файлов. (Ты в дальнейшем этапе, будешь писать только полные новые файлы в репозиторий). 2. Только Редактирование репозитория и его файлов. Ты не будешь писать новые полные файлы, а только будешь вносить изменение в существующие. 3. Общий режим. Написание новых файлов, и редактироваеие существующих. Полный доступ."
+
+        // ЖЕЛЕЗНЫЕ ЭТАЛОННЫЕ ПРОМПТЫ ЭТАПА 7 (НЕ ИЗМЕНЯТЬ НИ ОДНОГО СИМВОЛА):
+        private const val PROMPT_STAGE_7_START = "Пиши код на максимальный полет мыслей, не думай о токкенах и выводе. Даже если код обрежется (не хватит токкенов вывода, ничего страшного ) , я запущу новую сессию и ты допишешь код. Только это условие самое важное и критическое. Соблюдай его на 100% , пиши сколько сможешь."
+        private const val PROMPT_STAGE_7_CONTINUE = "Ты должен дописать код до 100% .Пиши код на максимальный полет мыслей, не думай о токкенах и выводе. Даже если код обрежется (не хватит токкенов вывода, ничего страшного ) , я запущу новую сессию и ты допишешь код. Только это условие самое важное и критическое. Соблюдай его на 100% , пиши сколько сможешь."
+
+        private const val SUCCESS_SENTINEL = ">>> CONVEYOR_MISSION_SUCCESS <<<"
 
         @OptIn(ExperimentalSerializationApi::class)
         private val json = Json {
@@ -422,12 +444,47 @@ class AutonomousOrchestrator(
                 _state.update {
                     it.copy(
                         executionMode = stage6Strategy.selectedMode,
-                        statusMessage = "Выбран режим: ${stage6Strategy.selectedMode.description}. Переход к Этапу 7..."
+                        statusMessage = "Выбран режим: ${stage6Strategy.selectedMode.description}."
                     )
                 }
 
                 // ====================================================================
-                // ПЕРЕХОД К ЭТАПУ 7 (ПЛАНИРОВАНИЕ И РЕАЛИЗАЦИЯ)
+                // РАЗВИЛКА: РЕЖИМ 1 (МОНОЛИТНЫЙ ПОТОКОВЫЙ ГЕНЕРАТОР НА 266K СИМВОЛОВ)
+                // ====================================================================
+                if (stage6Strategy.selectedMode == ConveyorExecutionMode.NEW_FILES_ONLY) {
+                    val monolithResult = executeStage7MonolithicStreamGeneration(
+                        owner = owner,
+                        repo = repo,
+                        branch = branch,
+                        userObjective = userObjective,
+                        stage5Research = stage5ResearchLog,
+                        sessionId = sessionId
+                    )
+                    appendDeepLog(monolithResult.logFormattedEntry)
+
+                    finalMessage = "Монолитная генерация завершена (${monolithResult.totalChars} симв., ${monolithResult.wavesCount} волн). " +
+                                   "Файл ${monolithResult.monolithFile.name} готов для селекции и распределения билдерами."
+                    isTaskSucceeded = monolithResult.isSuccess
+                    _state.update {
+                        it.copy(
+                            phase = OrchestratorPhase.CONVEYOR_SELECTION_STAGE8,
+                            statusMessage = finalMessage
+                        )
+                    }
+
+                    return@withLock AutonomousTaskResult(
+                        isSuccess = isTaskSucceeded,
+                        finalMessage = finalMessage,
+                        commitSha = null,
+                        totalSteps = monolithResult.wavesCount,
+                        repairRoundsUsed = 0,
+                        totalTokensBurned = _state.value.totalPromptTokens + _state.value.totalCandidateTokens + _state.value.totalThoughtsTokens,
+                        deepLogContent = _state.value.deepInvestigationLog
+                    )
+                }
+
+                // ====================================================================
+                // РЕЖИМЫ 2 И 3: СТАНДАРТНЫЙ REACT-ЦИКЛ (ПЛАНИРОВАНИЕ И ПРАВКИ)
                 // ====================================================================
                 val systemPrompt = buildSystemInstruction(owner, repo, branch)
                 val conversationHistory = mutableListOf<AgentContentDto>()
@@ -454,7 +511,7 @@ class AutonomousOrchestrator(
                 _state.update {
                     it.copy(
                         phase = OrchestratorPhase.REASONING_AND_PLANNING,
-                        statusMessage = "Шлюз к Этапу 7 открыт. Стратегия: ${stage6Strategy.selectedMode.description}. Реализация..."
+                        statusMessage = "Шлюз открыт. Стратегия: ${stage6Strategy.selectedMode.description}. Реализация..."
                     )
                 }
 
@@ -892,7 +949,6 @@ class AutonomousOrchestrator(
 
         val rawText = turn.parts.filter { it.thought != true }.mapNotNull { it.text }.joinToString("\n").trim()
 
-        // Детерминированный парсинг выбранного режима
         val selectedMode = when {
             rawText.contains("1") || rawText.contains("Только написание новых файлов", ignoreCase = true) ->
                 ConveyorExecutionMode.NEW_FILES_ONLY
@@ -914,6 +970,192 @@ class AutonomousOrchestrator(
         return Stage6StrategyResult(
             selectedMode = selectedMode,
             decisionExplanation = rawText,
+            logFormattedEntry = logEntry
+        )
+    }
+
+    // ====================================================================
+    // ЭТАП 7: МОНОЛИТНЫЙ ПОТОКОВЫЙ ГЕНЕРАТОР КОДА (266 000 СИМВОЛОВ НА ВОЛНУ)
+    // ====================================================================
+    private suspend fun executeStage7MonolithicStreamGeneration(
+        owner: String,
+        repo: String,
+        branch: String,
+        userObjective: String,
+        stage5Research: String,
+        sessionId: String
+    ): Stage7MonolithResult = withContext(Dispatchers.IO) {
+        val monolithDir = File(context.noBackupFilesDir, "workspaces/$sessionId")
+        monolithDir.mkdirs()
+        val monolithFile = File(monolithDir, "monolith_codebase.raw")
+        if (monolithFile.exists()) monolithFile.delete()
+        monolithFile.createNewFile()
+
+        val streamSystemPrompt = "Ты — генератор непрерывного исходного кода проекта ClientG на базе Gemini 3.8 Flash.\n" +
+                "Репозиторий: '$owner/$repo' (ветка: '$branch').\n" +
+                "Задача клиента:\n$userObjective\n\n" +
+                "РЕЗУЛЬТАТЫ ИССЛЕДОВАНИЯ 300 ИСТОЧНИКОВ:\n$stage5Research\n\n" +
+                "ПРАВИЛА ОФОРМЛЕНИЯ КОДА:\n" +
+                "1. Каждый файл ОБЯЗАН предваряться строкой заголовка с полным относительным путем и расширением:\n" +
+                ">>> FILE: path/to/Filename.ext\n" +
+                "2. Каждый файл ОБЯЗАН завершаться строкой:\n" +
+                "<<< END_FILE\n" +
+                "3. Пиши чистый, полный, компилируемый код без сокращений и без заглушек // TODO.\n" +
+                "4. Категорически запрещены любые вступительные слова, извинения, приветствия и беседы. Начинай вывод сразу с первого тега '>>> FILE:'.\n" +
+                "5. Когда абсолютно ВСЕ файлы проекта будут полностью написаны на 100%, выведи на отдельной строке финальный маркер завершения:\n" +
+                "$SUCCESS_SENTINEL"
+
+        var waveIndex = 0
+        var totalChars = 0L
+        var isCompleted = false
+        var activeStreamCacheId: String? = null
+
+        val tailWindow = StringBuilder()
+
+        try {
+            while (waveIndex < MAX_STREAM_WAVES && !isCompleted && isActive) {
+                waveIndex++
+                var currentWaveChars = 0
+
+                val promptText = if (waveIndex == 1) PROMPT_STAGE_7_START else PROMPT_STAGE_7_CONTINUE
+
+                _state.update {
+                    it.copy(
+                        phase = OrchestratorPhase.STREAM_GENERATION_STAGE7,
+                        statusMessage = "Этап 7: Генерация волны $waveIndex (планка 266k)... Собрано: $totalChars симв."
+                    )
+                }
+                _events.emit(OrchestratorEvent.PhaseChanged(
+                    OrchestratorPhase.STREAM_GENERATION_STAGE7,
+                    "Этап 7: Волна $waveIndex (всего $totalChars симв.)"
+                ))
+
+                val apiKey = geminiApiKeyProvider().trim()
+                val endpoint = "$GEMINI_BASE_URL/models/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
+
+                val wireTools = listOf(GeminiToolDto(googleSearch = emptyMap()))
+
+                val requestPayload = AgentWireRequest(
+                    cachedContent = activeStreamCacheId,
+                    systemInstruction = AgentSystemInstructionDto(listOf(AgentPartDto(text = streamSystemPrompt))),
+                    contents = listOf(AgentContentDto(role = "user", parts = listOf(AgentPartDto(text = promptText)))),
+                    tools = wireTools,
+                    generationConfig = AgentGenerationConfigDto(
+                        maxOutputTokens = 65536,
+                        thinkingConfig = AgentThinkingConfigDto(thinkingLevel = "HIGH", includeThoughts = true)
+                    )
+                )
+
+                val serializedPayload = json.encodeToString(AgentWireRequest.serializer(), requestPayload)
+
+                BufferedOutputStream(FileOutputStream(monolithFile, true)).use { outputStream ->
+                    httpClient.preparePost(endpoint) {
+                        header("x-goog-api-key", apiKey)
+                        header(HttpHeaders.Accept, "text/event-stream")
+                        header(HttpHeaders.CacheControl, "no-cache")
+                        contentType(ContentType.Application.Json)
+                        setBody(serializedPayload)
+                    }.execute { httpResponse ->
+                        if (!httpResponse.status.isSuccess()) {
+                            throw GeminiApiException(httpResponse.status, "HTTP_${httpResponse.status.value}", httpResponse.bodyAsText())
+                        }
+
+                        val channel = httpResponse.bodyAsChannel()
+                        while (!channel.isClosedForRead && isActive) {
+                            val line = channel.readUTF8Line() ?: break
+                            val trimmed = line.trim()
+                            if (!trimmed.startsWith("data:")) continue
+
+                            val dataPayload = trimmed.removePrefix("data:").trim()
+                            if (dataPayload == "[DONE]" || dataPayload.isEmpty()) break
+
+                            val chunk = runCatching {
+                                json.decodeFromString(AgentResponseChunk.serializer(), dataPayload)
+                            }.getOrNull() ?: continue
+
+                            chunk.usageMetadata?.let { usage ->
+                                val total = (usage.promptTokenCount + usage.candidatesTokenCount + usage.thoughtsTokenCount).toLong()
+                                _state.update {
+                                    it.copy(
+                                        totalPromptTokens = it.totalPromptTokens + usage.promptTokenCount,
+                                        totalCandidateTokens = it.totalCandidateTokens + usage.candidatesTokenCount,
+                                        totalThoughtsTokens = it.totalThoughtsTokens + usage.thoughtsTokenCount,
+                                        totalCachedTokens = it.totalCachedTokens + usage.cachedContentTokenCount
+                                    )
+                                }
+                                _events.emit(OrchestratorEvent.TokensUpdated(total, usage.promptTokenCount.toLong(), usage.candidatesTokenCount.toLong()))
+                            }
+
+                            chunk.candidates?.firstOrNull()?.content?.parts?.forEach { part ->
+                                if (part.thought == true) {
+                                    part.text?.let { delta ->
+                                        _events.tryEmit(OrchestratorEvent.ThinkingDelta(delta))
+                                    }
+                                } else {
+                                    val textChunk = part.text ?: ""
+                                    if (textChunk.isNotEmpty()) {
+                                        val bytes = textChunk.toByteArray(Charsets.UTF_8)
+                                        outputStream.write(bytes)
+                                        currentWaveChars += textChunk.length
+                                        totalChars += textChunk.length
+
+                                        tailWindow.append(textChunk)
+                                        if (tailWindow.length > 200) {
+                                            tailWindow.delete(0, tailWindow.length - 200)
+                                        }
+
+                                        if (tailWindow.contains(SUCCESS_SENTINEL)) {
+                                            isCompleted = true
+                                        }
+                                    }
+                                }
+                            }
+                            outputStream.flush()
+
+                            // Жёсткая отсечка 266 000 символов или сигнал успешного завершения
+                            if (currentWaveChars >= CONVEYOR_STREAM_CHAR_LIMIT || isCompleted) {
+                                break
+                            }
+                        }
+                    }
+                }
+
+                appendDeepLog(
+                    "• [ЭТАП 7 | ВОЛНА $waveIndex]: Зафиксировано $currentWaveChars символов на диске. " +
+                    "Всего в монолите: $totalChars символов." +
+                    if (isCompleted) " [СИГНАЛ SUCCESS ПОЛУЧЕН]" else " [ОТСЕЧКА 266k, ПЕРЕХОД К СЛЕДУЮЩЕЙ ВОЛНЕ]"
+                )
+
+                // Если модель ещё не закончила и впереди новая волна — закрепляем монолит в TPU Context Cache
+                if (!isCompleted && waveIndex < MAX_STREAM_WAVES && totalChars >= 120_000) {
+                    val fullMonolithText = monolithFile.readText(Charsets.UTF_8)
+                    val newCacheId = pinCodebaseContextCache(fullMonolithText)
+                    if (newCacheId != null) {
+                        deleteCodebaseContextCache(activeStreamCacheId)
+                        activeStreamCacheId = newCacheId
+                        AppLogger.i(AppLogger.TAG_APP, "Этап 7: Монолит зафиксирован в TPU Context Cache ($newCacheId) со скидкой 90%.")
+                    }
+                }
+            }
+        } finally {
+            deleteCodebaseContextCache(activeStreamCacheId)
+        }
+
+        val logEntry = buildString {
+            appendLine("=== [ЭТАП 7: МОНОЛИТНЫЙ ПОТОКОВЫЙ ГЕНЕРАТОР ЗАВЕРШЁН] ===")
+            appendLine("• Статус: ${if (isCompleted) "УСПЕХ (Сигнал завершения получен)" else "ОСТАНОВКА ПО ЛИМИТУ ВОЛН"}")
+            appendLine("• Всего волн генерации: $waveIndex")
+            appendLine("• Общий объём кодовой базы: $totalChars символов")
+            appendLine("• Локация монолита: ${monolithFile.absolutePath}")
+            appendLine("• ПЕРЕДАЧА В КОНВЕЙЕР СЕЛЕКЦИИ: Файл готов к парсингу на древовидную файловую структуру.")
+            append("=========================================================")
+        }
+
+        Stage7MonolithResult(
+            isSuccess = isCompleted || totalChars > 0,
+            totalChars = totalChars,
+            wavesCount = waveIndex,
+            monolithFile = monolithFile,
             logFormattedEntry = logEntry
         )
     }
@@ -1004,7 +1246,6 @@ class AutonomousOrchestrator(
 
         val sanitizedHistory = sanitizeHistoryForWire(history)
 
-        // Типобезопасное формирование инструментов: Google Search + Function Declarations
         val hasTools = !toolDeclarations.functionDeclarations.isNullOrEmpty() || toolDeclarations.googleSearch != null
         val wireTools: List<GeminiToolDto>? = if (hasTools) {
             val list = ArrayList<GeminiToolDto>()
@@ -1154,7 +1395,7 @@ class AutonomousOrchestrator(
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
         wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG)?.apply {
             setReferenceCounted(false)
-            acquire(30 * 60 * 1000L)
+            acquire(45 * 60 * 1000L) // 45 минут для длительной потоковой генерации на 1M+ символов
         }
     }
 
