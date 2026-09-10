@@ -75,6 +75,7 @@ class OrchestratorToolBridge(
 
     override fun getToolDeclarations(): GeminiToolDto {
         return GeminiToolDto(
+            googleSearch = emptyMap(), // Поиск Google активен непрерывно
             functionDeclarations = listOf(
                 FunctionDeclarationDto(
                     name = "workspace_get_tree",
@@ -321,7 +322,6 @@ class OrchestratorToolBridge(
                 }
             }
 
-            // МГНОВЕННЫЙ FAIL-FAST (0 МС) ЕСЛИ В РЕПОЗИТОРИИ НЕТ WORKFLOWS:
             "github_trigger_ci_build" -> {
                 if (!workspaceManager.hasConfiguredCiWorkflows()) {
                     return buildJsonObject {
@@ -385,7 +385,10 @@ class OrchestratorToolBridge(
     }
 
     private fun safeTruncate(text: String, maxChars: Int = MAX_OUTPUT_CHARS): String {
-        return if (text.length <= maxChars) text else text.take(maxChars) + "\n\n... [TRUNCATED]."
+        if (text.length <= maxChars) return text
+        var safeLen = maxChars
+        if (Character.isHighSurrogate(text[safeLen - 1])) safeLen--
+        return text.substring(0, safeLen) + "\n\n... [TRUNCATED]."
     }
 
     private fun JsonObject.getRequiredString(key: String): String {
