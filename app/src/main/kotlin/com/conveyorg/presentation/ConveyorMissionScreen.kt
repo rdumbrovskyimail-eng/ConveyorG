@@ -7,8 +7,10 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -22,7 +24,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -53,6 +57,7 @@ private val SurfaceDark = Color(0xFF101114)
 private val SurfaceLight = Color(0xFF16181D)
 private val BorderDim = Color(0xFF22252B)
 
+private val CardFlatWorker = Color(0xFF14171D)
 private val CardClassA = Color(0xFF131518)
 private val CardClassB = Color(0xFF1B1E24)
 
@@ -81,6 +86,7 @@ fun ConveyorMissionScreen(viewModel: ConveyorViewModel) {
     val keyboardController = LocalSoftwareKeyboardController.current
 
     val mainScrollState = rememberScrollState()
+    val swarmGridState = rememberLazyGridState()
 
     LaunchedEffect(Unit) {
         viewModel.sideEffects.collect { effect ->
@@ -138,8 +144,15 @@ fun ConveyorMissionScreen(viewModel: ConveyorViewModel) {
 
             AnimatedVisibility(visible = !state.mission.isGreenLightOn) {
                 Column(modifier = Modifier.fillMaxWidth()) {
+                    val isFlatMode = state.mission.builderCards.any { it.role == BuilderRole.FLAT_WORKER }
+                    val headerTitle = if (isFlatMode) {
+                        "РОЙ ПЛОСКИХ ВОРКЕРОВ (${state.mission.builderCards.size} ЗАДАЧ • 1 ВОРКЕР = 1 ФАЙЛ)"
+                    } else {
+                        "РОЙ СТРОИТЕЛЕЙ (${state.mission.builderCards.size} ВОРКЕРОВ)"
+                    }
+
                     Text(
-                        text = "РОЙ СТРОИТЕЛЕЙ (10 A • 10 B)",
+                        text = headerTitle,
                         color = TextMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold,
                         style = MonospaceTypography, modifier = Modifier.padding(start = 18.dp, top = 6.dp, bottom = 6.dp)
                     )
@@ -147,20 +160,41 @@ fun ConveyorMissionScreen(viewModel: ConveyorViewModel) {
                     if (state.mission.builderCards.isEmpty()) {
                         EmptySwarmPlaceholder(state.mission.isRunning)
                     } else {
-                        LazyVerticalGrid(
-                            columns = GridCells.Adaptive(minSize = 165.dp),
-                            modifier = Modifier.fillMaxWidth().heightIn(max = 640.dp).padding(horizontal = 14.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        // Окно роя на 50-100 воркеров с вертикальным ползунком прокрутки (Scrollbar)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 440.dp)
+                                .padding(horizontal = 14.dp)
                         ) {
-                            items(items = state.mission.builderCards, key = { it.taskId }) { card ->
-                                BuilderCardItem(
-                                    card = card,
-                                    isExpanded = state.expandedBuilderTaskId == card.taskId,
-                                    onToggle = { viewModel.onToggleBuilderCard(card.taskId) },
-                                    onCollapse = { viewModel.onCollapseExpandedCard() }
-                                )
+                            LazyVerticalGrid(
+                                state = swarmGridState,
+                                columns = GridCells.Adaptive(minSize = 160.dp),
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(end = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                items(items = state.mission.builderCards, key = { it.taskId }) { card ->
+                                    BuilderCardItem(
+                                        card = card,
+                                        isExpanded = state.expandedBuilderTaskId == card.taskId,
+                                        onToggle = { viewModel.onToggleBuilderCard(card.taskId) }
+                                    )
+                                }
                             }
+
+                            // Неоновый вертикальный ползунок прокрутки для 50-100 воркеров
+                            VerticalGridScrollbar(
+                                gridState = swarmGridState,
+                                totalItems = state.mission.builderCards.size,
+                                isGreenLight = state.mission.isGreenLightOn,
+                                modifier = Modifier
+                                    .align(Alignment.CenterEnd)
+                                    .fillMaxHeight()
+                                    .width(4.dp)
+                            )
                         }
                     }
                 }
@@ -185,7 +219,6 @@ fun ConveyorMissionScreen(viewModel: ConveyorViewModel) {
                 keyboardController?.hide()
             },
             onCancel = { viewModel.onCancelMission() },
-            onCollapseCard = { viewModel.onCollapseExpandedCard() },
             modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.ime).padding(horizontal = 14.dp, vertical = 8.dp)
         )
 
@@ -200,10 +233,55 @@ fun ConveyorMissionScreen(viewModel: ConveyorViewModel) {
 
         if (state.isDeepLogOpen) {
             DeepLogDialog(
-                logContent = state.mission.deepInvestigationLog.ifBlank { "Журнал сессии пока пуст. Запустите задачу для формирования этапов 1-4." },
+                logContent = state.mission.deepInvestigationLog.ifBlank { "Журнал сессии пока пуст. Запустите задачу для формирования этапов." },
                 onDismiss = { viewModel.onToggleDeepLog() }
             )
         }
+    }
+}
+
+/**
+ * Неоновый вертикальный скроллбар с адаптивным ползунком
+ */
+@Composable
+private fun VerticalGridScrollbar(
+    gridState: LazyGridState,
+    totalItems: Int,
+    isGreenLight: Boolean,
+    modifier: Modifier = Modifier
+) {
+    if (totalItems <= 4) return
+
+    val thumbColor = if (isGreenLight) NeonGreen else NeonCyan
+    val trackColor = Color(0xFF1B1E24)
+
+    Canvas(modifier = modifier) {
+        val layoutInfo = gridState.layoutInfo
+        val visibleItems = layoutInfo.visibleItemsInfo.size
+        if (visibleItems == 0 || totalItems == 0) return@Canvas
+
+        val viewRatio = (visibleItems.toFloat() / totalItems.toFloat()).coerceIn(0.1f, 1f)
+        val thumbHeight = (size.height * viewRatio).coerceAtLeast(24.dp.toPx())
+
+        val firstVisible = gridState.firstVisibleItemIndex.toFloat()
+        val scrollRatio = (firstVisible / (totalItems - visibleItems).coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
+        val thumbOffset = (size.height - thumbHeight) * scrollRatio
+
+        // Фоновый трек
+        drawRoundRect(
+            color = trackColor,
+            topLeft = Offset(0f, 0f),
+            size = Size(size.width, size.height),
+            cornerRadius = CornerRadius(2.dp.toPx())
+        )
+
+        // Активный ползунок
+        drawRoundRect(
+            color = thumbColor,
+            topLeft = Offset(0f, thumbOffset),
+            size = Size(size.width, thumbHeight),
+            cornerRadius = CornerRadius(2.dp.toPx())
+        )
     }
 }
 
@@ -413,18 +491,30 @@ private fun RendezvousBarrierBar(state: ConveyorScreenUiState, modifier: Modifie
 }
 
 @Composable
-private fun BuilderCardItem(card: BuilderCardUiModel, isExpanded: Boolean, onToggle: () -> Unit, onCollapse: () -> Unit) {
-    val isClassA = card.role == BuilderRole.PRIMARY_A
+private fun BuilderCardItem(card: BuilderCardUiModel, isExpanded: Boolean, onToggle: () -> Unit) {
+    val isFlat = card.role == BuilderRole.FLAT_WORKER
+    val cardColor = when (card.role) {
+        BuilderRole.FLAT_WORKER -> CardFlatWorker
+        BuilderRole.PRIMARY_A -> CardClassA
+        BuilderRole.CROSS_CUTTING_B -> CardClassB
+    }
+
+    val workerLabel = if (isFlat) {
+        "#${card.stageNumber.toString().padStart(2, '0')}"
+    } else {
+        if (card.role == BuilderRole.PRIMARY_A) "A${card.stageNumber}" else "B${card.stageNumber}"
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).border(1.dp, if (isExpanded) NeonCyan else BorderDim, RoundedCornerShape(10.dp)).clickable { onToggle() },
-        colors = CardDefaults.cardColors(containerColor = if (isClassA) CardClassA else CardClassB)
+        colors = CardDefaults.cardColors(containerColor = cardColor)
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CanvasLedIndicator(color = if (card.status == BuilderStatus.SUCCESS) NeonGreen else NeonCyan, isPulsing = card.status == BuilderStatus.RUNNING)
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(text = if (isClassA) "A${card.stageNumber}" else "B${card.stageNumber}", color = TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
+                    Text(text = workerLabel, color = TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
                 }
                 Text(text = card.status.name.take(6), color = if (card.status == BuilderStatus.SUCCESS) NeonGreen else TextMuted, fontSize = 8.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
             }
@@ -441,7 +531,7 @@ private fun PostBarrierVerificationConsole(state: ConveyorScreenUiState, modifie
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.CheckCircle, contentDescription = "OK", tint = NeonGreen, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("ДВУХКОНТУРНАЯ ВЕРИФИКАЦИЯ", color = NeonGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
+                Text("АТОМАРНЫЙ ПУШ ЗАВЕРШЕН", color = NeonGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
             }
             if (state.mission.lastCommitSha != null) {
                 Spacer(modifier = Modifier.height(6.dp))
@@ -459,7 +549,6 @@ private fun MissionControlCapsule(
     onObjectiveChanged: (String) -> Unit,
     onStart: () -> Unit,
     onCancel: () -> Unit,
-    onCollapseCard: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(shape = RoundedCornerShape(20.dp), color = Color(0xFF121418), border = BorderStroke(1.dp, BorderDim), shadowElevation = 12.dp, modifier = modifier) {
@@ -537,7 +626,7 @@ private fun CanvasMainGreenLamp(isIgnited: Boolean) {
 @Composable
 private fun EmptySwarmPlaceholder(isRunning: Boolean) {
     Box(modifier = Modifier.fillMaxWidth().height(80.dp).padding(horizontal = 14.dp).background(SurfaceDark, RoundedCornerShape(10.dp)).border(1.dp, BorderDim, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
-        Text(text = if (isRunning) "Оркестратор координирует задачи..." else "Рой строителей активируется при масштабных задачах.", color = TextMuted, fontSize = 11.sp, style = MonospaceTypography)
+        Text(text = if (isRunning) "Оркестратор подготавливает монолит кодовой базы..." else "Рой плоских воркеров активируется на этапе селекции.", color = TextMuted, fontSize = 11.sp, style = MonospaceTypography)
     }
 }
 
