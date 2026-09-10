@@ -41,7 +41,8 @@ import kotlin.random.Random
 
 enum class BuilderRole {
     PRIMARY_A,
-    CROSS_CUTTING_B
+    CROSS_CUTTING_B,
+    FLAT_WORKER // Равноправный независимый воркер режима создания файлов
 }
 
 enum class BuilderStatus {
@@ -94,6 +95,7 @@ data class SwarmState(
     val registeredCount: Int = 0,
     val primaryCountA: Int = 0,
     val crossCountB: Int = 0,
+    val flatCount: Int = 0,
     val isSealed: Boolean = false,
     val expectedBarrier: Int = 0,
     val remainingBarrier: Int = 0,
@@ -198,13 +200,13 @@ class BuilderSwarmCoordinator(
 ) : Closeable {
 
     companion object {
-        const val MAX_TOTAL_BUILDERS = 20
-        const val MAX_PRIMARY_BUILDERS_A = 10
-        const val MAX_CROSS_BUILDERS_B = 10
-        private const val CONCURRENCY_PERMITS = 10
+        const val MAX_TOTAL_BUILDERS = 120 // Поддержка масштабных проектов до 100+ файлов
+        const val MAX_PRIMARY_BUILDERS_A = 20
+        const val MAX_CROSS_BUILDERS_B = 20
+        private const val CONCURRENCY_PERMITS = 20 // Высокопроизводительный пул сокетов
 
         private const val LITE_MODEL_NAME = "gemini-3.5-flash-lite"
-        private const val API_BASE_URL = "https://aiplatform.googleapis.com/v1/publishers/google/models"
+        private const val API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
         private const val WORKER_TIMEOUT_MS = 90_000L
 
         @OptIn(ExperimentalSerializationApi::class)
@@ -217,9 +219,9 @@ class BuilderSwarmCoordinator(
 
         fun createDefaultHttpClient(): HttpClient = HttpClient(CIO) {
             engine {
-                maxConnectionsCount = 32
+                maxConnectionsCount = 64
                 endpoint {
-                    maxConnectionsPerRoute = 16
+                    maxConnectionsPerRoute = 32
                     connectTimeout = 20_000
                 }
             }
@@ -234,7 +236,7 @@ class BuilderSwarmCoordinator(
     private val _state = MutableStateFlow(SwarmState())
     val state: StateFlow<SwarmState> = _state.asStateFlow()
 
-    private val _events = MutableSharedFlow<SwarmEvent>(extraBufferCapacity = 64)
+    private val _events = MutableSharedFlow<SwarmEvent>(extraBufferCapacity = 128)
     val events: SharedFlow<SwarmEvent> = _events.asSharedFlow()
 
     private val coordinatorScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -252,15 +254,16 @@ class BuilderSwarmCoordinator(
 
     private val swarmStartTime = System.currentTimeMillis()
 
-    suspend fun registerPrimaryBuilderA(
-        stageNumber: Int,
+    /**
+     * Высокоскоростная регистрация независимого плоского воркера (1 воркер = 1 файл)
+     */
+    suspend fun registerFlatBuilder(
+        index: Int,
         targetFile: String,
-        instruction: String,
-        referenceCode: String? = null
+        codeSnippet: String
     ): String = registrationMutex.withLock {
         val currentState = _state.value
 
-        // Многоволновой режим: если предыдущая волна завершилась, открываем новую
         if (currentState.isGreenLightOn) {
             _state.update {
                 it.copy(
@@ -272,7 +275,70 @@ class BuilderSwarmCoordinator(
             }
             barrierDeferred = CompletableDeferred()
         } else if (currentState.isSealed) {
-            // Динамическое расширение барьера при добавлении задач на лету
+            atomicRemainingBarrier.incrementAndGet()
+            _state.update {
+                it.copy(
+                    expectedBarrier = it.expectedBarrier + 1,
+                    remainingBarrier = it.remainingBarrier + 1
+                )
+            }
+        }
+
+        check(currentState.registeredCount < MAX_TOTAL_BUILDERS) {
+            "Превышен абсолютный потолок роя ($MAX_TOTAL_BUILDERS воркеров)."
+        }
+
+        val taskId = "flat_worker_${index.toString().padStart(2, '0')}_${UUID.randomUUID().toString().take(4)}"
+        val instruction = "Ты должен создать этот файл по пути $targetFile в репозитории."
+        val task = BuilderTask(
+            taskId = taskId,
+            role = BuilderRole.FLAT_WORKER,
+            stageNumber = index,
+            targetFile = targetFile,
+            instruction = instruction,
+            referenceCode = codeSnippet,
+            dependencyTaskId = null
+        )
+
+        val signal = CompletableDeferred<BuilderReport>()
+        registeredTasks[taskId] = task
+        taskSignals[taskId] = signal
+
+        _state.update {
+            it.copy(
+                registeredCount = it.registeredCount + 1,
+                flatCount = it.flatCount + 1,
+                statusMessage = "Запущен воркер #${index.toString().padStart(2, '0')}: $targetFile"
+            )
+        }
+        _events.emit(SwarmEvent.TaskRegistered(taskId, BuilderRole.FLAT_WORKER, targetFile))
+
+        coordinatorScope.launch {
+            executeWorkerLifecycle(task, signal)
+        }
+
+        taskId
+    }
+
+    suspend fun registerPrimaryBuilderA(
+        stageNumber: Int,
+        targetFile: String,
+        instruction: String,
+        referenceCode: String? = null
+    ): String = registrationMutex.withLock {
+        val currentState = _state.value
+
+        if (currentState.isGreenLightOn) {
+            _state.update {
+                it.copy(
+                    isSealed = false,
+                    isGreenLightOn = false,
+                    expectedBarrier = 0,
+                    remainingBarrier = 0
+                )
+            }
+            barrierDeferred = CompletableDeferred()
+        } else if (currentState.isSealed) {
             atomicRemainingBarrier.incrementAndGet()
             _state.update {
                 it.copy(
@@ -283,10 +349,10 @@ class BuilderSwarmCoordinator(
         }
 
         check(currentState.primaryCountA < MAX_PRIMARY_BUILDERS_A) {
-            "Превышен лимит основных билдеров A (Максимум: $MAX_PRIMARY_BUILDERS_A)."
+            "Превышен лимит основных билдеров A ($MAX_PRIMARY_BUILDERS_A)."
         }
         check(currentState.registeredCount < MAX_TOTAL_BUILDERS) {
-            "Достигнут абсолютный потолок роя (Максимум: $MAX_TOTAL_BUILDERS клиентов)."
+            "Превышен лимит роя ($MAX_TOTAL_BUILDERS)."
         }
 
         val taskId = "builder_A_stage_${stageNumber}_${UUID.randomUUID().toString().take(6)}"
@@ -308,7 +374,7 @@ class BuilderSwarmCoordinator(
             it.copy(
                 registeredCount = it.registeredCount + 1,
                 primaryCountA = it.primaryCountA + 1,
-                statusMessage = "Зарегистрирован билдер A ($stageNumber/10): $targetFile"
+                statusMessage = "Зарегистрирован билдер A ($stageNumber): $targetFile"
             )
         }
         _events.emit(SwarmEvent.TaskRegistered(taskId, BuilderRole.PRIMARY_A, targetFile))
@@ -349,10 +415,10 @@ class BuilderSwarmCoordinator(
         }
 
         check(currentState.crossCountB < MAX_CROSS_BUILDERS_B) {
-            "Превышен лимит сквозных билдеров B (Максимум: $MAX_CROSS_BUILDERS_B)."
+            "Превышен лимит сквозных билдеров B ($MAX_CROSS_BUILDERS_B)."
         }
         check(currentState.registeredCount < MAX_TOTAL_BUILDERS) {
-            "Достигнут абсолютный потолок роя (Максимум: $MAX_TOTAL_BUILDERS клиентов)."
+            "Превышен лимит роя ($MAX_TOTAL_BUILDERS)."
         }
         check(taskSignals.containsKey(dependencyTaskId)) {
             "Зависимость '$dependencyTaskId' не найдена в реестре задач."
@@ -407,11 +473,11 @@ class BuilderSwarmCoordinator(
                 isSealed = true,
                 expectedBarrier = expectedCount,
                 remainingBarrier = remaining,
-                statusMessage = "Барьер запечатан на $expectedCount задач. Осталось отчетов: $remaining"
+                statusMessage = "Барьер запечатан на $expectedCount задач. Осталось: $remaining"
             )
         }
 
-        AppLogger.i(AppLogger.TAG_APP, "SwarmCoordinator: Барьер запечатан (планка=$expectedCount, осталось=$remaining)")
+        AppLogger.i(AppLogger.TAG_APP, "SwarmCoordinator: Барьер запечатан ($expectedCount задач, осталось=$remaining)")
 
         if (remaining == 0) {
             triggerGreenLight()
@@ -437,13 +503,13 @@ class BuilderSwarmCoordinator(
 
             val parentReport = parentSignal?.await()
             if (parentReport == null || parentReport.status != BuilderStatus.SUCCESS.name) {
-                AppLogger.w(AppLogger.TAG_APP, "SwarmWorker [${task.taskId}]: Предшественник упал. Аннулирование по закону A -> B.")
+                AppLogger.w(AppLogger.TAG_APP, "SwarmWorker [${task.taskId}]: Предшественник упал. Аннулирование.")
                 val abortReport = BuilderReport(
                     taskId = task.taskId,
                     role = task.role.name,
                     targetFile = task.targetFile,
                     status = BuilderStatus.ABORTED_UPSTREAM_CORRUPTED.name,
-                    summary = "Задача аннулирована: родительская задача ${task.dependencyTaskId} завершилась со сбоем.",
+                    summary = "Аннулировано из-за родительской задачи ${task.dependencyTaskId}.",
                     filesTouched = emptyList(),
                     durationMs = System.currentTimeMillis() - workerStartTime,
                     errorMessage = "Upstream task failure"
@@ -463,13 +529,13 @@ class BuilderSwarmCoordinator(
                     finalizeTaskReport(report, taskSignal)
                 }
             } catch (e: Exception) {
-                AppLogger.e(AppLogger.TAG_APP, "SwarmWorker [${task.taskId}]: Фатальная ошибка воркера: ${e.message}", e)
+                AppLogger.e(AppLogger.TAG_APP, "SwarmWorker [${task.taskId}]: Ошибка: ${e.message}", e)
                 val failReport = BuilderReport(
                     taskId = task.taskId,
                     role = task.role.name,
                     targetFile = task.targetFile,
                     status = BuilderStatus.FAILED.name,
-                    summary = "Сбой выполнения воркера: ${e.localizedMessage}",
+                    summary = "Сбой: ${e.localizedMessage}",
                     filesTouched = emptyList(),
                     durationMs = System.currentTimeMillis() - workerStartTime,
                     errorMessage = e.message
@@ -486,19 +552,19 @@ class BuilderSwarmCoordinator(
 
     private suspend fun runWorkerReActLoop(task: BuilderTask, startTime: Long): BuilderReport {
         val systemPrompt = "Ты — быстрый инженер-сборщик ClientG на базе Gemini 3.5 Flash-Lite.\n" +
-                "Твоя цель: реализовать подзадачу строго для файла '${task.targetFile}'.\n" +
+                "Твоя цель: записать чистовой файл строго по пути '${task.targetFile}'.\n" +
                 "ПЕСОЧНИЦА ИНСТРУМЕНТОВ:\n" +
-                "1. sandbox_read_file(path) — прочесть файл.\n" +
-                "2. sandbox_write_file(path, content) — записать чистовой код без Markdown-разметки.\n" +
-                "3. sandbox_submit_report(status, summary) — сдать отчет о завершении.\n" +
+                "1. sandbox_write_file(path, content) — записать чистовой код на UFS 4.0.\n" +
+                "2. sandbox_submit_report(status, summary) — сдать отчёт о создании файла.\n" +
                 "Запрещено писать код в чат — записывай его строго через 'sandbox_write_file'."
 
         val initialPrompt = buildString {
-            appendLine("ЗАДАЧА [${task.role} | Этап ${task.stageNumber}]:")
             appendLine("Целевой файл: ${task.targetFile}")
-            appendLine("Инструкция:\n${task.instruction}")
+            appendLine(task.instruction)
             if (!task.referenceCode.isNullOrBlank()) {
-                appendLine("\nЭТАЛОННЫЙ АРХИТЕКТУРНЫЙ КОД:\n${task.referenceCode}")
+                appendLine()
+                appendLine("КОД ДЛЯ ЗАПИСИ:")
+                appendLine(task.referenceCode)
             }
         }
 
@@ -548,7 +614,7 @@ class BuilderSwarmCoordinator(
                     }
                     "sandbox_write_file" -> {
                         val path = functionCall.args["path"]?.jsonPrimitive?.content ?: task.targetFile
-                        val content = functionCall.args["content"]?.jsonPrimitive?.content ?: ""
+                        val content = functionCall.args["content"]?.jsonPrimitive?.content ?: task.referenceCode ?: ""
 
                         val cleanContent = content.trim()
                             .replace(Regex("^```[a-zA-Z0-9_-]*\\r?\\n"), "")
@@ -565,7 +631,7 @@ class BuilderSwarmCoordinator(
                     }
                     "sandbox_submit_report" -> {
                         val statusStr = functionCall.args["status"]?.jsonPrimitive?.content ?: "SUCCESS"
-                        val summaryStr = functionCall.args["summary"]?.jsonPrimitive?.content ?: "Код успешно интегрирован."
+                        val summaryStr = functionCall.args["summary"]?.jsonPrimitive?.content ?: "Файл успешно создан."
 
                         reportOutcome = BuilderReport(
                             taskId = task.taskId,
@@ -581,7 +647,7 @@ class BuilderSwarmCoordinator(
 
                         buildJsonObject { put("status", "acknowledged") }
                     }
-                    else -> buildJsonObject { put("error", "Неизвестный инструмент песочницы.") }
+                    else -> buildJsonObject { put("error", "Неизвестный инструмент.") }
                 }
 
                 conversation.add(
@@ -599,6 +665,11 @@ class BuilderSwarmCoordinator(
                     )
                 )
             } else {
+                // Если воркер не вызвал инструмент, но у нас есть эталонный код — записываем его напрямую
+                if (touchedFiles.isEmpty() && !task.referenceCode.isNullOrBlank()) {
+                    workspaceManager.writeFileAtomic(task.targetFile, task.referenceCode.toByteArray(Charsets.UTF_8))
+                    touchedFiles.add(task.targetFile)
+                }
                 break
             }
         }
@@ -608,7 +679,7 @@ class BuilderSwarmCoordinator(
             role = task.role.name,
             targetFile = task.targetFile,
             status = if (touchedFiles.isNotEmpty()) BuilderStatus.SUCCESS.name else BuilderStatus.FAILED.name,
-            summary = "Работа завершена воркером (затронуто файлов: ${touchedFiles.size}).",
+            summary = "Файл зафиксирован на диске (байт: ${task.referenceCode?.length ?: 0}).",
             filesTouched = touchedFiles,
             durationMs = System.currentTimeMillis() - startTime,
             promptTokens = totalPromptTokens,
@@ -625,7 +696,7 @@ class BuilderSwarmCoordinator(
 
         if (failedPrimaryTasksCount.get() >= 3) {
             _state.update { it.copy(circuitBreakerTripped = true) }
-            _events.emit(SwarmEvent.CircuitBreakerTripped("Слишком много сбоев основных задач A (>= 3). Волна прервана."))
+            _events.emit(SwarmEvent.CircuitBreakerTripped("Превышен лимит сбоев основных задач A."))
         }
 
         val remaining = atomicRemainingBarrier.decrementAndGet()
@@ -633,7 +704,7 @@ class BuilderSwarmCoordinator(
             it.copy(
                 remainingBarrier = maxOf(0, remaining),
                 reportsSubmittedCount = it.reportsSubmittedCount + 1,
-                statusMessage = "Сдан отчет [${report.taskId}]: ${report.status} (Осталось: ${maxOf(0, remaining)})"
+                statusMessage = "Отчёт [${report.targetFile.substringAfterLast('/')}]: ${report.status} (Осталось: ${maxOf(0, remaining)})"
             )
         }
         _events.emit(SwarmEvent.ReportSubmitted(report.taskId, BuilderStatus.valueOf(report.status), maxOf(0, remaining)))
@@ -658,12 +729,12 @@ class BuilderSwarmCoordinator(
             totalTokensBurned = collectedReports.sumOf { (it.promptTokens + it.candidateTokens).toLong() }
         )
 
-        _state.update { it.copy(isGreenLightOn = true, statusMessage = "🟢 ЗЕЛЕНАЯ ЛАМПОЧКА! Все отчеты собраны.") }
+        _state.update { it.copy(isGreenLightOn = true, statusMessage = "🟢 ЗЕЛЕНАЯ ЛАМПОЧКА! Все файлы на диске UFS 4.0.") }
         barrierDeferred.complete(manifest)
         coordinatorScope.launch {
             _events.emit(SwarmEvent.GreenLightIgnited(manifest))
         }
-        AppLogger.i(AppLogger.TAG_APP, "SwarmCoordinator: 🟢 ЗЕЛЕНАЯ ЛАМПОЧКА ВСПЫХНУЛА! Манифест готов (${manifest.totalCompleted} отчетов).")
+        AppLogger.i(AppLogger.TAG_APP, "SwarmCoordinator: 🟢 ЗЕЛЕНАЯ ЛАМПОЧКА! Готово ${manifest.totalCompleted} файлов.")
     }
 
     private suspend fun executeLiteUnaryWithRetry(
@@ -689,18 +760,11 @@ class BuilderSwarmCoordinator(
         history: List<LiteContentDto>
     ): LiteUnaryResponse = withContext(Dispatchers.IO) {
         val apiKey = apiKeyProvider().trim()
-        val url = "$API_BASE_URL/$LITE_MODEL_NAME:generateContent?key=$apiKey"
+        val url = "$API_BASE_URL/models/$LITE_MODEL_NAME:generateContent?key=$apiKey"
 
         val sandboxTools = listOf(
             GeminiToolDto(
                 functionDeclarations = listOf(
-                    FunctionDeclarationDto(
-                        name = "sandbox_read_file",
-                        description = "Читает файл из песочницы.",
-                        parameters = FunctionParametersSchemaDto(
-                            properties = mapOf("path" to ParameterPropertyDto(type = "STRING", description = "Путь к файлу"))
-                        )
-                    ),
                     FunctionDeclarationDto(
                         name = "sandbox_write_file",
                         description = "Записывает чистовой исходный код в файл рабочей области.",
