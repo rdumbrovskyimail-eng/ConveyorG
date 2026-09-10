@@ -118,7 +118,7 @@ class AutonomousConveyorController(
                         currentPhase = OrchestratorPhase.INITIALIZING_WORKSPACE,
                         maxSteps = maxSteps,
                         maxRepairRounds = maxRepairRounds,
-                        statusMessage = "Запуск конвейера (Этапы 1-4)..."
+                        statusMessage = "Запуск конвейера (Этапы 1-5)..."
                     )
                 }
 
@@ -426,7 +426,10 @@ class CompositeOrchestratorToolBridge(
                 parameters = FunctionParametersSchemaDto(properties = emptyMap())
             )
         )
-        return GeminiToolDto(functionDeclarations = baseDeclarations + swarmDeclarations)
+        return GeminiToolDto(
+            googleSearch = emptyMap(), // Поиск Google активен для композитного моста на всех шагах билдинга
+            functionDeclarations = baseDeclarations + swarmDeclarations
+        )
     }
 
     override suspend fun dispatchToolCall(call: FunctionCallDto, thoughtSignature: String?): FunctionResponsePartDto {
