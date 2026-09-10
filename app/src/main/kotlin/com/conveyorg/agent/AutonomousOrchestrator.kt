@@ -894,8 +894,18 @@ class AutonomousOrchestrator(
         val endpoint = "$GEMINI_BASE_URL/models/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
 
         val sanitizedHistory = sanitizeHistoryForWire(history)
+
+        // Google Search активен непрерывно: если есть инструменты, Google Search гарантированно включается в массив tools
         val hasTools = !toolDeclarations.functionDeclarations.isNullOrEmpty() || toolDeclarations.googleSearch != null
-        val wireTools = if (hasTools) listOf(toolDeclarations) else null
+        val wireTools = if (hasTools) {
+            buildList {
+                val searchMap = toolDeclarations.googleSearch ?: emptyMap()
+                add(GeminiToolDto(googleSearch = searchMap))
+                if (!toolDeclarations.functionDeclarations.isNullOrEmpty()) {
+                    add(GeminiToolDto(functionDeclarations = toolDeclarations.functionDeclarations))
+                }
+            }
+        } else null
 
         val requestPayload = AgentWireRequest(
             cachedContent = cachedContentId,
@@ -1049,7 +1059,8 @@ class AutonomousOrchestrator(
                "2. РЕЖИМ РОЯ: для объемной логики и модулей ОБЯЗАТЕЛЬНО запускай билдеров 3.5 Lite ('swarm_dispatch_primary_builder', 'swarm_dispatch_cross_builder', 'swarm_seal_barrier').\n" +
                "3. ДИФФ И КОММИТ: проверяй 'workspace_read_diff' и пушь 'github_push_atomic_commit'.\n" +
                "4. АВТО-ОСТАНОВКА: при успехе коммита и отсутствии CI в репозитории — НЕ вызывай другие инструменты, сразу завершай задачу отчетом!\n" +
-               "5. CI: вызывай 'github_trigger_ci_build' ТОЛЬКО при наличии .github/workflows/*.yml."
+               "5. CI: вызывай 'github_trigger_ci_build' ТОЛЬКО при наличии .github/workflows/*.yml.\n" +
+               "6. ПОИСК GOOGLE: у тебя ВСЕГДА активен поиск в интернете (Google Search). На любом шаге реализации используй его для проверки актуальной документации библиотек, версий зависимостей и решения ошибок компиляции."
     }
 
     private fun buildInitialUserPrompt(
