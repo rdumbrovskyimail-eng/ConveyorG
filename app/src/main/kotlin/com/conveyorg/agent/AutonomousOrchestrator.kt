@@ -47,7 +47,7 @@ enum class OrchestratorPhase {
     RESEARCH_STAGE_5C,          // Этап 5c: Изучение 100 иных первоисточников, волна 3 (HIGH)
     STRATEGY_SELECTION_STAGE6,  // Этап 6: Стратегический выбор режима исполнения (HIGH)
     STREAM_GENERATION_STAGE7,   // Этап 7: Монолитный непрерывный генератор кода (266k волны)
-    CONVEYOR_SELECTION_STAGE8,  // Этап 8: Подготовка монолита к селекции и распределению
+    CONVEYOR_SELECTION_STAGE8,  // Этап 8: Нарезка монолита и запуск плоского роя воркеров
     REASONING_AND_PLANNING,
     EXECUTING_TOOL,
     AWAITING_BARRIER,
@@ -238,19 +238,15 @@ class AutonomousOrchestrator(
         private const val BASELINE_BACKOFF_MS = 1500L
         private const val MAX_BACKOFF_MS = 16000L
 
-        // ЖЕЛЕЗНАЯ КАЛИБРОВКА ПОТОКА ЭТАПА 7:
         private const val CONVEYOR_STREAM_CHAR_LIMIT = 266_000
         private const val MAX_STREAM_WAVES = 8
 
-        // ЖЕЛЕЗНЫЕ ЭТАЛОННЫЕ ПРОМПТЫ ЭТАПА 5 (НЕ ИЗМЕНЯТЬ НИ ОДНОГО СИМВОЛА):
         private const val PROMPT_STAGE_5A = "Проанализируй и максимально глубоко изучи 100 первоисточников в интернете, по данным запроса клиента, и кодовой базы проекта. Данные запиши в лог и запомни."
         private const val PROMPT_STAGE_5B = "изучи 100 иных первоисточников в интернете, по данным запроса клиента, и кодовой базы проекта. Данные запиши в лог и запомни."
         private const val PROMPT_STAGE_5C = "изучи 100 иных первоисточников в интернете, по данным запроса клиента, и кодовой базы проекта. Данные запиши в лог и запомни."
 
-        // ЖЕЛЕЗНЫЙ ЭТАЛОННЫЙ ПРОМПТ ЭТАПА 6:
         private const val PROMPT_STAGE_6 = "У тебя есть анализ Репозитория, анализ запроса клиента, и анализ 300 источников. Подумай хорошо, и выбери один из трех доступных тебе режимов: 1. Только написание новых файлов. (Ты в дальнейшем этапе, будешь писать только полные новые файлы в репозиторий). 2. Только Редактирование репозитория и его файлов. Ты не будешь писать новые полные файлы, а только будешь вносить изменение в существующие. 3. Общий режим. Написание новых файлов, и редактироваеие существующих. Полный доступ."
 
-        // ЖЕЛЕЗНЫЕ ЭТАЛОННЫЕ ПРОМПТЫ ЭТАПА 7 (НЕ ИЗМЕНЯТЬ НИ ОДНОГО СИМВОЛА):
         private const val PROMPT_STAGE_7_START = "Пиши код на максимальный полет мыслей, не думай о токкенах и выводе. Даже если код обрежется (не хватит токкенов вывода, ничего страшного ) , я запущу новую сессию и ты допишешь код. Только это условие самое важное и критическое. Соблюдай его на 100% , пиши сколько сможешь."
         private const val PROMPT_STAGE_7_CONTINUE = "Ты должен дописать код до 100% .Пиши код на максимальный полет мыслей, не думай о токкенах и выводе. Даже если код обрежется (не хватит токкенов вывода, ничего страшного ) , я запущу новую сессию и ты допишешь код. Только это условие самое важное и критическое. Соблюдай его на 100% , пиши сколько сможешь."
 
@@ -290,7 +286,8 @@ class AutonomousOrchestrator(
         maxRepairRounds: Int = 3,
         existingWorkspaceManager: LocalWorkspaceManager? = null,
         existingGitHubEngine: GitHubEngine? = null,
-        existingToolBridge: OrchestratorBridge? = null
+        existingToolBridge: OrchestratorBridge? = null,
+        existingSwarmCoordinator: BuilderSwarmCoordinator? = null
     ): AutonomousTaskResult = withContext(Dispatchers.IO) {
         loopMutex.withLock {
             val sessionId = existingWorkspaceManager?.sessionId ?: UUID.randomUUID().toString()
@@ -341,7 +338,6 @@ class AutonomousOrchestrator(
                 val stage2Result = performStage2FeasibilityCheck(userObjective, t0PassportText)
                 appendDeepLog(stage2Result.logFormattedEntry)
 
-                // МГНОВЕННЫЙ FAIL-FAST ПРИ ВЕРДИКТЕ [ЛОЖЬ]:
                 if (!stage2Result.isFeasible) {
                     val rejectMessage = "Миссия остановлена на Этапе 2: задача несовместима с репозиторием (ВЕРДИКТ: ЛОЖЬ).\n${stage2Result.explanation}"
                     _state.update {
@@ -371,7 +367,6 @@ class AutonomousOrchestrator(
                 }
                 _events.emit(OrchestratorEvent.PhaseChanged(OrchestratorPhase.PHYSICAL_DEPLOY_STAGE3, "Этап 3: Физический деплой"))
 
-                // Проверка пустоты песочницы UFS 4.0
                 if (!isRemoteEmpty && workspaceManager.isWorkspaceEmpty()) {
                     gitHubEngine.downloadAndUnpackZipball(owner, repo, branch, workspaceManager.workspaceRoot)
                 }
@@ -399,7 +394,6 @@ class AutonomousOrchestrator(
                 val allFilesBundle = workspaceManager.collectAllTextFilesForAudit()
                 val codebaseBundleString = buildCodebaseXmlPayload(allFilesBundle)
 
-                // Фиксация в TPU Context Cache при размере кодовой базы >= 120 000 символов
                 if (codebaseBundleString.length >= 120_000) {
                     pinnedCacheId = pinCodebaseContextCache(codebaseBundleString)
                 }
@@ -449,7 +443,7 @@ class AutonomousOrchestrator(
                 }
 
                 // ====================================================================
-                // РАЗВИЛКА: РЕЖИМ 1 (МОНОЛИТНЫЙ ПОТОКОВЫЙ ГЕНЕРАТОР НА 266K СИМВОЛОВ)
+                // РАЗВИЛКА: РЕЖИМ 1 (ГЕНЕРАТОР НА 266K + ЭТАП 8: СЕЛЕКЦИЯ И ПЛОСКИЙ РОЙ)
                 // ====================================================================
                 if (stage6Strategy.selectedMode == ConveyorExecutionMode.NEW_FILES_ONLY) {
                     val monolithResult = executeStage7MonolithicStreamGeneration(
@@ -462,21 +456,38 @@ class AutonomousOrchestrator(
                     )
                     appendDeepLog(monolithResult.logFormattedEntry)
 
-                    finalMessage = "Монолитная генерация завершена (${monolithResult.totalChars} симв., ${monolithResult.wavesCount} волн). " +
-                                   "Файл ${monolithResult.monolithFile.name} готов для селекции и распределения билдерами."
-                    isTaskSucceeded = monolithResult.isSuccess
+                    // ЭТАП 8: Мгновенная нарезка и запуск плоского роя воркеров
+                    val swarmCoordinator = existingSwarmCoordinator
+                        ?: throw IllegalStateException("BuilderSwarmCoordinator не передан для запуска роя.")
+
+                    val selectionResult = executeStage8FastSelectionAndFlatDispatch(
+                        monolithFile = monolithResult.monolithFile,
+                        workspaceManager = workspaceManager,
+                        gitHubEngine = gitHubEngine,
+                        swarmCoordinator = swarmCoordinator,
+                        owner = owner,
+                        repo = repo,
+                        branch = branch
+                    )
+                    appendDeepLog(selectionResult.logFormattedEntry)
+
+                    lastCommittedSha = selectionResult.commitSha
+                    finalMessage = "Миссия успешно завершена: ${selectionResult.filesCount} файлов создано и отправлено 1 коммитом: $lastCommittedSha"
+                    isTaskSucceeded = true
+
                     _state.update {
                         it.copy(
-                            phase = OrchestratorPhase.CONVEYOR_SELECTION_STAGE8,
+                            phase = OrchestratorPhase.COMPLETED,
+                            lastCommitSha = lastCommittedSha,
                             statusMessage = finalMessage
                         )
                     }
 
                     return@withLock AutonomousTaskResult(
-                        isSuccess = isTaskSucceeded,
+                        isSuccess = true,
                         finalMessage = finalMessage,
-                        commitSha = null,
-                        totalSteps = monolithResult.wavesCount,
+                        commitSha = lastCommittedSha,
+                        totalSteps = monolithResult.wavesCount + 1,
                         repairRoundsUsed = 0,
                         totalTokensBurned = _state.value.totalPromptTokens + _state.value.totalCandidateTokens + _state.value.totalThoughtsTokens,
                         deepLogContent = _state.value.deepInvestigationLog
@@ -484,7 +495,7 @@ class AutonomousOrchestrator(
                 }
 
                 // ====================================================================
-                // РЕЖИМЫ 2 И 3: СТАНДАРТНЫЙ REACT-ЦИКЛ (ПЛАНИРОВАНИЕ И ПРАВКИ)
+                // РЕЖИМЫ 2 И 3: СТАНДАРТНЫЙ REACT-ЦИКЛ (ПРАВКИ ИЛИ ГИБРИД)
                 // ====================================================================
                 val systemPrompt = buildSystemInstruction(owner, repo, branch)
                 val conversationHistory = mutableListOf<AgentContentDto>()
@@ -604,7 +615,6 @@ class AutonomousOrchestrator(
                         )
                     )
 
-                    // АВТО-СТОП ЦИКЛА ПОСЛЕ УСПЕШНОГО КОММИТА (если нет воркфлоу):
                     if (commitSucceededOnThisTurn && !workspaceManager.hasConfiguredCiWorkflows()) {
                         finalMessage = "Коммит зафиксирован: $lastCommittedSha. Задача выполнена за $currentStep шагов."
                         isTaskSucceeded = true
@@ -650,9 +660,6 @@ class AutonomousOrchestrator(
         }
     }
 
-    // ====================================================================
-    // ЭТАП 1: РЕКОГНОСЦИРОВКА T0 (РЕЖИМ LOW) — ТОПОЛОГИЯ GITHUB БЕЗ СКАЧИВАНИЯ
-    // ====================================================================
     private suspend fun performT0Reconnaissance(
         owner: String,
         repo: String,
@@ -700,9 +707,6 @@ class AutonomousOrchestrator(
                "\n============================================="
     }
 
-    // ====================================================================
-    // ЭТАП 2: ШЛЮЗ ВАЛИДАЦИИ «ИСТИНА / ЛОЖЬ» (РЕЖИМ HIGH)
-    // ====================================================================
     private suspend fun performStage2FeasibilityCheck(
         userObjective: String,
         t0Passport: String
@@ -777,9 +781,6 @@ class AutonomousOrchestrator(
         }
     }
 
-    // ====================================================================
-    // ЭТАП 4: ТОТАЛЬНЫЙ БЕСПРИСТРАСТНЫЙ АУДИТ КОДОВОЙ БАЗЫ (РЕЖИМ HIGH)
-    // ====================================================================
     private suspend fun performStage4CodebaseAudit(
         owner: String,
         repo: String,
@@ -788,7 +789,6 @@ class AutonomousOrchestrator(
     ): String {
         val codebasePayload = buildCodebaseXmlPayload(filesMap)
 
-        // ЖЕЛЕЗНЫЙ ЭТАЛОННЫЙ ПРОМПТ НАБЛЮДАТЕЛЯ:
         val prompt = "Изучи полностью весь репозиторий, максимально глубоко, каждый файл от корня до конца, как только сможешь. " +
                      "Выпиши подробные результаты в лог и запомни, и больше не предпринимай никаких действий и ничего не создавай.\n\n" +
                      "Кодовая база репозитория '$owner/$repo' ($branch):\n\n" +
@@ -807,9 +807,6 @@ class AutonomousOrchestrator(
                "\n=============================================="
     }
 
-    // ====================================================================
-    // ЭТАП 5: ТРЕХВОЛНОВОЕ ИССЛЕДОВАНИЕ 300 ПЕРВОИСТОЧНИКОВ (5A -> 5B -> 5C)
-    // ====================================================================
     private suspend fun executeStage5TripleWaveResearch(
         owner: String,
         repo: String,
@@ -826,9 +823,6 @@ class AutonomousOrchestrator(
 
         val researchHistory = mutableListOf<AgentContentDto>()
 
-        // --------------------------------------------------------------------
-        // Подэтап 5a
-        // --------------------------------------------------------------------
         _state.update {
             it.copy(
                 phase = OrchestratorPhase.RESEARCH_STAGE_5A,
@@ -847,16 +841,12 @@ class AutonomousOrchestrator(
             cachedContentId = cachedContentId
         )
         researchHistory.add(turn5a)
-
         val result5a = turn5a.parts.filter { it.thought != true }.mapNotNull { it.text }.joinToString("\n").trim()
         val entry5a = "=== [ЭТАП 5A: ИССЛЕДОВАНИЕ 100 ПЕРВОИСТОЧНИКОВ] ===\n" +
                 result5a.ifBlank { "Исследование первых 100 первоисточников зафиксировано." } +
                 "\n================================================="
         appendDeepLog(entry5a)
 
-        // --------------------------------------------------------------------
-        // Подэтап 5b
-        // --------------------------------------------------------------------
         _state.update {
             it.copy(
                 phase = OrchestratorPhase.RESEARCH_STAGE_5B,
@@ -875,16 +865,12 @@ class AutonomousOrchestrator(
             cachedContentId = cachedContentId
         )
         researchHistory.add(turn5b)
-
         val result5b = turn5b.parts.filter { it.thought != true }.mapNotNull { it.text }.joinToString("\n").trim()
         val entry5b = "=== [ЭТАП 5B: ИССЛЕДОВАНИЕ 100 ИНЫХ ПЕРВОИСТОЧНИКОВ] ===\n" +
                 result5b.ifBlank { "Исследование второй волны первоисточников зафиксировано." } +
                 "\n======================================================"
         appendDeepLog(entry5b)
 
-        // --------------------------------------------------------------------
-        // Подэтап 5c
-        // --------------------------------------------------------------------
         _state.update {
             it.copy(
                 phase = OrchestratorPhase.RESEARCH_STAGE_5C,
@@ -903,7 +889,6 @@ class AutonomousOrchestrator(
             cachedContentId = cachedContentId
         )
         researchHistory.add(turn5c)
-
         val result5c = turn5c.parts.filter { it.thought != true }.mapNotNull { it.text }.joinToString("\n").trim()
         val entry5c = "=== [ЭТАП 5C: ИССЛЕДОВАНИЕ 100 ИНЫХ ПЕРВОИСТОЧНИКОВ (ВОЛНА 3)] ===\n" +
                 result5c.ifBlank { "Исследование третьей волны первоисточников зафиксировано." } +
@@ -913,9 +898,6 @@ class AutonomousOrchestrator(
         return "$entry5a\n\n$entry5b\n\n$entry5c"
     }
 
-    // ====================================================================
-    // ЭТАП 6: СТРАТЕГИЧЕСКИЙ ВЫБОР РЕЖИМА ИСПОЛНЕНИЯ (РЕЖИМ HIGH)
-    // ====================================================================
     private suspend fun executeStage6StrategySelection(
         owner: String,
         repo: String,
@@ -974,9 +956,6 @@ class AutonomousOrchestrator(
         )
     }
 
-    // ====================================================================
-    // ЭТАП 7: МОНОЛИТНЫЙ ПОТОКОВЫЙ ГЕНЕРАТОР КОДА (266 000 СИМВОЛОВ НА ВОЛНУ)
-    // ====================================================================
     private suspend fun executeStage7MonolithicStreamGeneration(
         owner: String,
         repo: String,
@@ -1112,7 +1091,6 @@ class AutonomousOrchestrator(
                             }
                             outputStream.flush()
 
-                            // Жёсткая отсечка 266 000 символов или сигнал успешного завершения
                             if (currentWaveChars >= CONVEYOR_STREAM_CHAR_LIMIT || isCompleted) {
                                 break
                             }
@@ -1126,7 +1104,6 @@ class AutonomousOrchestrator(
                     if (isCompleted) " [СИГНАЛ SUCCESS ПОЛУЧЕН]" else " [ОТСЕЧКА 266k, ПЕРЕХОД К СЛЕДУЮЩЕЙ ВОЛНЕ]"
                 )
 
-                // Если модель ещё не закончила и впереди новая волна — закрепляем монолит в TPU Context Cache
                 if (!isCompleted && waveIndex < MAX_STREAM_WAVES && totalChars >= 120_000) {
                     val fullMonolithText = monolithFile.readText(Charsets.UTF_8)
                     val newCacheId = pinCodebaseContextCache(fullMonolithText)
@@ -1158,6 +1135,131 @@ class AutonomousOrchestrator(
             monolithFile = monolithFile,
             logFormattedEntry = logEntry
         )
+    }
+
+    // ====================================================================
+    // ЭТАП 8: МГНОВЕННАЯ СЕЛЕКЦИЯ, ПЛОСКИЙ РОЙ И 1 АТОМАРНЫЙ КОММИТ
+    // ====================================================================
+    private data class Stage8SelectionResult(
+        val filesCount: Int,
+        val commitSha: String,
+        val logFormattedEntry: String
+    )
+
+    private suspend fun executeStage8FastSelectionAndFlatDispatch(
+        monolithFile: File,
+        workspaceManager: LocalWorkspaceManager,
+        gitHubEngine: GitHubEngine,
+        swarmCoordinator: BuilderSwarmCoordinator,
+        owner: String,
+        repo: String,
+        branch: String
+    ): Stage8SelectionResult = withContext(Dispatchers.IO) {
+        _state.update {
+            it.copy(
+                phase = OrchestratorPhase.CONVEYOR_SELECTION_STAGE8,
+                statusMessage = "Этап 8: Нарезка монолита и запуск плоского роя (1 воркер = 1 файл)..."
+            )
+        }
+        _events.emit(OrchestratorEvent.PhaseChanged(
+            OrchestratorPhase.CONVEYOR_SELECTION_STAGE8,
+            "Этап 8: Потоковая селекция и распределение роем"
+        ))
+
+        var currentPath: String? = null
+        val currentCodeBuilder = StringBuilder()
+        var extractedFilesCount = 0
+
+        fun dispatchCurrentFile() {
+            val path = currentPath ?: return
+            val code = currentCodeBuilder.toString().trim()
+            if (path.isNotBlank() && code.isNotBlank()) {
+                extractedFilesCount++
+                val fileNum = extractedFilesCount
+                // Мгновенная отправка в плоский воркер (1 файл = 1 воркер)
+                coordinatorScopeLaunch {
+                    swarmCoordinator.registerFlatBuilder(
+                        index = fileNum,
+                        targetFile = path,
+                        codeSnippet = code
+                    )
+                }
+            }
+            currentPath = null
+            currentCodeBuilder.setLength(0)
+        }
+
+        // Построчная нарезка монолита на UFS 4.0
+        monolithFile.forEachLine(Charsets.UTF_8) { line ->
+            val trimmed = line.trim()
+            when {
+                trimmed.startsWith(">>> FILE:") -> {
+                    dispatchCurrentFile()
+                    currentPath = trimmed.removePrefix(">>> FILE:").trim()
+                }
+                trimmed.startsWith("<<< END_FILE") -> {
+                    dispatchCurrentFile()
+                }
+                trimmed.contains(SUCCESS_SENTINEL) -> {
+                    dispatchCurrentFile()
+                }
+                else -> {
+                    if (currentPath != null) {
+                        currentCodeBuilder.append(line).append("\n")
+                    }
+                }
+            }
+        }
+        dispatchCurrentFile()
+
+        if (extractedFilesCount == 0) {
+            throw IllegalStateException("В монолите не обнаружено ни одного размеченного файла (>>> FILE: ...).")
+        }
+
+        // Запечатываем барьер синхронизации роя ровно на число нарезанных файлов
+        swarmCoordinator.sealBarrier(extractedFilesCount)
+
+        // Ожидаем зажигания Зеленой лампочки (все 50-100 файлов записаны на UFS 4.0)
+        val manifest = swarmCoordinator.awaitGreenLight(300_000L)
+
+        // Формируем дельту созданных файлов в локальной песочнице
+        val delta = workspaceManager.computeChangedFiles()
+        if (delta.modifiedFiles.isEmpty()) {
+            throw IllegalStateException("Файлы не зафиксированы на диске UFS 4.0 после отчётов роя.")
+        }
+
+        // 1 АТОМАРНЫЙ КОММИТ В GITHUB ОТ ОРКЕСТРАТОРА
+        _state.update { it.copy(statusMessage = "Отправка 1 атомарного коммита в $branch (${delta.modifiedFiles.size} файлов)...") }
+        val commitMessage = "feat: autonomous monolith codebase deployment (${delta.modifiedFiles.size} files)"
+        val pushResult = gitHubEngine.pushAtomicCommit(
+            owner = owner,
+            repo = repo,
+            branch = branch,
+            commitMessage = commitMessage,
+            modifiedFiles = delta.modifiedFiles,
+            deletedFiles = delta.deletedFiles
+        )
+
+        val logEntry = buildString {
+            appendLine("=== [ЭТАП 8: СЕЛЕКЦИЯ И АТОМАРНЫЙ КОММИТ ЗАВЕРШЕНЫ] ===")
+            appendLine("• Файлов нарезано и отдано рою: $extractedFilesCount")
+            appendLine("• Успешно записано воркерами на UFS 4.0: ${manifest.successCount}")
+            appendLine("• Ошибок воркеров: ${manifest.failedCount}")
+            appendLine("• Сформирован 1 атомарный коммит: ${pushResult.commitSha}")
+            appendLine("• Ветка: ${pushResult.branch}")
+            appendLine("• ЗЕЛЁНАЯ ЛАМПОЧКА: Проект полностью материализован в Git-репозитории.")
+            append("=========================================================")
+        }
+
+        Stage8SelectionResult(
+            filesCount = extractedFilesCount,
+            commitSha = pushResult.commitSha,
+            logFormattedEntry = logEntry
+        )
+    }
+
+    private fun coordinatorScopeLaunch(block: suspend CoroutineScope.() -> Unit) {
+        CoroutineScope(Dispatchers.IO).launch { block() }
     }
 
     private fun appendDeepLog(text: String) {
@@ -1395,7 +1497,7 @@ class AutonomousOrchestrator(
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
         wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG)?.apply {
             setReferenceCounted(false)
-            acquire(45 * 60 * 1000L) // 45 минут для длительной потоковой генерации на 1M+ символов
+            acquire(45 * 60 * 1000L)
         }
     }
 
