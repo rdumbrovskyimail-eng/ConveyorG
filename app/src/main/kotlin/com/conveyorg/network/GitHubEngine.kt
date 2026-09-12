@@ -72,9 +72,15 @@ data class GitHubRefDto(
 
 @Serializable
 data class GitHubRefObjectDto(
-    val sha: String,
-    val type: String,
-    val url: String
+    val sha: String = "",
+    val type: String? = null, // type опционален (в объектах tree он отсутствует)
+    val url: String = ""
+)
+
+@Serializable
+data class GitHubCommitTreeDto(
+    val sha: String = "",
+    val url: String = ""
 )
 
 @Serializable
@@ -134,9 +140,9 @@ internal data class CreateCommitRequest(
 
 @Serializable
 data class GitHubCommitResponseDto(
-    val sha: String,
+    val sha: String = "",
     val message: String? = null,
-    val tree: GitHubRefObjectDto? = null,
+    val tree: GitHubCommitTreeDto? = null, // Безопасная десериализация дерева коммита без поля type
     val parents: List<GitHubRefObjectDto> = emptyList()
 )
 
