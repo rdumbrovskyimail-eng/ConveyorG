@@ -131,7 +131,8 @@ fun ConveyorMissionScreen(viewModel: ConveyorViewModel) {
                 ErrorBannerCard(errorMessage = state.activeBannerError ?: "") { viewModel.onDismissBannerError() }
             }
 
-            OrchestratorMonolithCard(
+            // ИНФОРМАЦИОННЫЙ СТЕНД МИССИИ (MISSION CONTROL HUD)
+            MissionControlHudStand(
                 state = state,
                 onOpenLog = { viewModel.onToggleDeepLog() },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)
@@ -160,7 +161,6 @@ fun ConveyorMissionScreen(viewModel: ConveyorViewModel) {
                     if (state.mission.builderCards.isEmpty()) {
                         EmptySwarmPlaceholder(state.mission.isRunning)
                     } else {
-                        // Окно роя на 50-100 воркеров с вертикальным ползунком прокрутки (Scrollbar)
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -185,7 +185,6 @@ fun ConveyorMissionScreen(viewModel: ConveyorViewModel) {
                                 }
                             }
 
-                            // Неоновый вертикальный ползунок прокрутки для 50-100 воркеров
                             VerticalGridScrollbar(
                                 gridState = swarmGridState,
                                 totalItems = state.mission.builderCards.size,
@@ -241,8 +240,120 @@ fun ConveyorMissionScreen(viewModel: ConveyorViewModel) {
 }
 
 /**
- * Неоновый вертикальный скроллбар с адаптивным ползунком
+ * ИНФОРМАЦИОННЫЙ СТЕНД ТЕЛЕМЕТРИИ (MISSION CONTROL HUD)
+ * Выводит микро-детали: фазу, уровень рассуждений, бегущую строку диска и памяти
  */
+@Composable
+private fun MissionControlHudStand(
+    state: ConveyorScreenUiState,
+    onOpenLog: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.clip(RoundedCornerShape(14.dp)).border(1.dp, BorderDim, RoundedCornerShape(14.dp)),
+        colors = CardDefaults.cardColors(containerColor = MonolithBlack)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            // Верхняя плашка индикаторов и статусов
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CanvasLedIndicator(color = if (state.mission.isRunning) NeonCyan else NeonGreen, isPulsing = state.mission.isRunning)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("GEMINI 3.8 FLASH • MISSION HUD", color = TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Black, style = MonospaceTypography)
+                }
+
+                // Индикатор активной стадии
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = Color(0xFF131924),
+                    border = BorderStroke(0.5.dp, NeonCyan)
+                ) {
+                    Text(
+                        text = state.mission.currentPhase.name.replace("_", " "),
+                        color = NeonCyan,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        style = MonospaceTypography,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Телеметрия системы (Стенд параметров)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                HudMetricChip("РЕЖИМ", "HIGH", NeonAmber, Modifier.weight(1f))
+                HudMetricChip("ПОИСК", "GOOGLE ON", NeonGreen, Modifier.weight(1.2f))
+                HudMetricChip("ВОЛНА", "266K UFS", NeonBlue, Modifier.weight(1.1f))
+                HudMetricChip("КЭШ TPU", "90% OFF", NeonCyan, Modifier.weight(1.1f))
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Бегущая строка хода мыслей и потокового лога
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 90.dp, max = 150.dp)
+                    .background(Color(0xFF0A0C10), RoundedCornerShape(8.dp))
+                    .border(0.5.dp, Color(0xFF1B202A), RoundedCornerShape(8.dp))
+                    .padding(10.dp)
+            ) {
+                SelectionContainer {
+                    Text(
+                        text = state.mission.liveOrchestratorThought.ifBlank { state.mission.statusMessage },
+                        color = Color(0xFFE2E8F0), fontSize = 11.sp, lineHeight = 16.sp, style = MonospaceTypography
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Детальная строка текущей операции I/O
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Build, contentDescription = "I/O", tint = NeonCyan, modifier = Modifier.size(12.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = state.mission.statusMessage,
+                        color = TextPrimary,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MonospaceTypography
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(4.dp), color = Color(0xFF16202E), border = BorderStroke(0.5.dp, NeonCyan),
+                    modifier = Modifier.clickable { onOpenLog() }
+                ) {
+                    Text("ЛОГ ↗", color = NeonCyan, fontSize = 9.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HudMetricChip(label: String, value: String, accentColor: Color, modifier: Modifier = Modifier) {
+    Surface(
+        shape = RoundedCornerShape(6.dp),
+        color = Color(0xFF0E1116),
+        border = BorderStroke(0.5.dp, Color(0xFF1F242F)),
+        modifier = modifier
+    ) {
+        Column(modifier = Modifier.padding(vertical = 4.dp, horizontal = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(text = label, color = TextMuted, fontSize = 8.sp, style = MonospaceTypography)
+            Text(text = value, color = accentColor, fontSize = 9.sp, fontWeight = FontWeight.Bold, maxLines = 1, style = MonospaceTypography)
+        }
+    }
+}
+
 @Composable
 private fun VerticalGridScrollbar(
     gridState: LazyGridState,
@@ -267,7 +378,6 @@ private fun VerticalGridScrollbar(
         val scrollRatio = (firstVisible / (totalItems - visibleItems).coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
         val thumbOffset = (size.height - thumbHeight) * scrollRatio
 
-        // Фоновый трек
         drawRoundRect(
             color = trackColor,
             topLeft = Offset(0f, 0f),
@@ -275,7 +385,6 @@ private fun VerticalGridScrollbar(
             cornerRadius = CornerRadius(2.dp.toPx())
         )
 
-        // Активный ползунок
         drawRoundRect(
             color = thumbColor,
             topLeft = Offset(0f, thumbOffset),
@@ -412,59 +521,6 @@ private fun DeepLogDialog(
             }
         }
     )
-}
-
-@Composable
-private fun OrchestratorMonolithCard(
-    state: ConveyorScreenUiState,
-    onOpenLog: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        modifier = modifier.clip(RoundedCornerShape(14.dp)).border(1.dp, BorderDim, RoundedCornerShape(14.dp)),
-        colors = CardDefaults.cardColors(containerColor = MonolithBlack)
-    ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CanvasLedIndicator(color = if (state.mission.isRunning) NeonBlue else NeonGreen, isPulsing = state.mission.isRunning)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("GEMINI 3.8 FLASH • ORCHESTRATOR", color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Black, style = MonospaceTypography)
-                }
-                Text("[ШАГ ${state.mission.currentStep}/${state.mission.maxSteps}]", color = NeonCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography)
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 90.dp, max = 160.dp)
-                    .background(Color(0xFF0A0C10), RoundedCornerShape(8.dp))
-                    .border(0.5.dp, Color(0xFF1B202A), RoundedCornerShape(8.dp))
-                    .padding(10.dp)
-            ) {
-                SelectionContainer {
-                    Text(
-                        text = state.mission.liveOrchestratorThought.ifBlank { state.mission.statusMessage },
-                        color = Color(0xFFE2E8F0), fontSize = 11.sp, lineHeight = 16.sp, style = MonospaceTypography
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text(text = state.mission.statusMessage, color = TextSecondary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MonospaceTypography, modifier = Modifier.weight(1f))
-                Surface(
-                    shape = RoundedCornerShape(4.dp), color = Color(0xFF16202E), border = BorderStroke(0.5.dp, NeonCyan),
-                    modifier = Modifier.clickable { onOpenLog() }
-                ) {
-                    Text("ЛОГ ↗", color = NeonCyan, fontSize = 9.sp, fontWeight = FontWeight.Bold, style = MonospaceTypography, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                }
-            }
-        }
-    }
 }
 
 @Composable
@@ -626,7 +682,7 @@ private fun CanvasMainGreenLamp(isIgnited: Boolean) {
 @Composable
 private fun EmptySwarmPlaceholder(isRunning: Boolean) {
     Box(modifier = Modifier.fillMaxWidth().height(80.dp).padding(horizontal = 14.dp).background(SurfaceDark, RoundedCornerShape(10.dp)).border(1.dp, BorderDim, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
-        Text(text = if (isRunning) "Оркестратор подготавливает монолит кодовой базы..." else "Рой плоских воркеров активируется на этапе селекции.", color = TextMuted, fontSize = 11.sp, style = MonospaceTypography)
+        Text(text = if (isRunning) "Оркестратор формирует монолит и ведёт нарезку..." else "Рой плоских воркеров активируется на этапе селекции.", color = TextMuted, fontSize = 11.sp, style = MonospaceTypography)
     }
 }
 
