@@ -231,7 +231,9 @@ class AutonomousOrchestrator(
     private val loopMutex = Mutex()
 
     companion object {
-        private const val GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+        // ЭТАЛОННЫЙ ЭНДПОИНТ ИЗ РАБОТАЮЩЕГО CLIENTG:
+        private const val BASE_URL = "https://aiplatform.googleapis.com/v1/publishers/google/models"
+        private const val ROOT_V1 = "https://aiplatform.googleapis.com/v1"
         private const val MODEL_NAME = "gemini-3.8-flash"
         private const val WAKELOCK_TAG = "ClientG:AutonomousOrchestrator"
 
@@ -456,7 +458,6 @@ class AutonomousOrchestrator(
                     )
                     appendDeepLog(monolithResult.logFormattedEntry)
 
-                    // ЭТАП 8: Мгновенная нарезка и запуск плоского роя воркеров
                     val swarmCoordinator = existingSwarmCoordinator
                         ?: throw IllegalStateException("BuilderSwarmCoordinator не передан для запуска роя.")
 
@@ -1010,7 +1011,8 @@ class AutonomousOrchestrator(
                 ))
 
                 val apiKey = geminiApiKeyProvider().trim()
-                val endpoint = "$GEMINI_BASE_URL/models/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
+                // РАБОЧИЙ ЭНДПОИНТ CLIENTG:
+                val endpoint = "$BASE_URL/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
 
                 val wireTools = listOf(GeminiToolDto(googleSearch = emptyMap()))
 
@@ -1032,6 +1034,7 @@ class AutonomousOrchestrator(
                         header("x-goog-api-key", apiKey)
                         header(HttpHeaders.Accept, "text/event-stream")
                         header(HttpHeaders.CacheControl, "no-cache")
+                        header("X-Accel-Buffering", "no")
                         contentType(ContentType.Application.Json)
                         setBody(serializedPayload)
                     }.execute { httpResponse ->
@@ -1137,9 +1140,6 @@ class AutonomousOrchestrator(
         )
     }
 
-    // ====================================================================
-    // ЭТАП 8: МГНОВЕННАЯ СЕЛЕКЦИЯ, ПЛОСКИЙ РОЙ И 1 АТОМАРНЫЙ КОММИТ
-    // ====================================================================
     private data class Stage8SelectionResult(
         val filesCount: Int,
         val commitSha: String,
@@ -1176,7 +1176,6 @@ class AutonomousOrchestrator(
             if (path.isNotBlank() && code.isNotBlank()) {
                 extractedFilesCount++
                 val fileNum = extractedFilesCount
-                // Мгновенная отправка в плоский воркер (1 файл = 1 воркер)
                 coordinatorScopeLaunch {
                     swarmCoordinator.registerFlatBuilder(
                         index = fileNum,
@@ -1189,7 +1188,6 @@ class AutonomousOrchestrator(
             currentCodeBuilder.setLength(0)
         }
 
-        // Построчная нарезка монолита на UFS 4.0
         monolithFile.forEachLine(Charsets.UTF_8) { line ->
             val trimmed = line.trim()
             when {
@@ -1216,19 +1214,14 @@ class AutonomousOrchestrator(
             throw IllegalStateException("В монолите не обнаружено ни одного размеченного файла (>>> FILE: ...).")
         }
 
-        // Запечатываем барьер синхронизации роя ровно на число нарезанных файлов
         swarmCoordinator.sealBarrier(extractedFilesCount)
-
-        // Ожидаем зажигания Зеленой лампочки (все 50-100 файлов записаны на UFS 4.0)
         val manifest = swarmCoordinator.awaitGreenLight(300_000L)
 
-        // Формируем дельту созданных файлов в локальной песочнице
         val delta = workspaceManager.computeChangedFiles()
         if (delta.modifiedFiles.isEmpty()) {
             throw IllegalStateException("Файлы не зафиксированы на диске UFS 4.0 после отчётов роя.")
         }
 
-        // 1 АТОМАРНЫЙ КОММИТ В GITHUB ОТ ОРКЕСТРАТОРА
         _state.update { it.copy(statusMessage = "Отправка 1 атомарного коммита в $branch (${delta.modifiedFiles.size} файлов)...") }
         val commitMessage = "feat: autonomous monolith codebase deployment (${delta.modifiedFiles.size} files)"
         val pushResult = gitHubEngine.pushAtomicCommit(
@@ -1275,9 +1268,9 @@ class AutonomousOrchestrator(
         val apiKey = geminiApiKeyProvider().trim()
         if (apiKey.isBlank() || codebasePayload.length < 120_000) return@withContext null
 
-        val endpoint = "$GEMINI_BASE_URL/cachedContents?key=$apiKey"
+        val endpoint = "$ROOT_V1/cachedContents?key=$apiKey"
         val requestPayload = buildJsonObject {
-            put("model", "models/$MODEL_NAME")
+            put("model", "publishers/google/models/$MODEL_NAME")
             putJsonArray("contents") {
                 addJsonObject {
                     put("role", "user")
@@ -1297,6 +1290,7 @@ class AutonomousOrchestrator(
 
         runCatching {
             val response = httpClient.post(endpoint) {
+                header("x-goog-api-key", apiKey)
                 contentType(ContentType.Application.Json)
                 setBody(requestPayload.toString())
             }
@@ -1311,7 +1305,11 @@ class AutonomousOrchestrator(
         if (cachedName.isNullOrBlank()) return@withContext
         val apiKey = geminiApiKeyProvider().trim()
         if (apiKey.isBlank()) return@withContext
-        runCatching { httpClient.delete("$GEMINI_BASE_URL/$cachedName?key=$apiKey") }
+        runCatching {
+            httpClient.delete("$ROOT_V1/$cachedName?key=$apiKey") {
+                header("x-goog-api-key", apiKey)
+            }
+        }
     }
 
     private suspend fun executeGeminiTurnWithRetry(
@@ -1344,7 +1342,8 @@ class AutonomousOrchestrator(
         cachedContentId: String? = null
     ): AgentContentDto = withContext(Dispatchers.IO) {
         val apiKey = geminiApiKeyProvider().trim()
-        val endpoint = "$GEMINI_BASE_URL/models/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
+        // РАБОЧИЙ ЭНДПОИНТ CLIENTG:
+        val endpoint = "$BASE_URL/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
 
         val sanitizedHistory = sanitizeHistoryForWire(history)
 
@@ -1383,6 +1382,7 @@ class AutonomousOrchestrator(
             header("x-goog-api-key", apiKey)
             header(HttpHeaders.Accept, "text/event-stream")
             header(HttpHeaders.CacheControl, "no-cache")
+            header("X-Accel-Buffering", "no")
             contentType(ContentType.Application.Json)
             setBody(serializedBody)
         }.execute { httpResponse ->
