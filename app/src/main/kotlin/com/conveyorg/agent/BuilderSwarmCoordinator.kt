@@ -35,14 +35,10 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.random.Random
 
-// ====================================================================
-// 1. Доменные Модели и Контракты Роя Билдеров
-// ====================================================================
-
 enum class BuilderRole {
     PRIMARY_A,
     CROSS_CUTTING_B,
-    FLAT_WORKER // Равноправный независимый воркер режима создания файлов
+    FLAT_WORKER
 }
 
 enum class BuilderStatus {
@@ -115,10 +111,6 @@ sealed interface SwarmEvent {
     data class CircuitBreakerTripped(val reason: String) : SwarmEvent
 }
 
-// ====================================================================
-// 2. Внутренние DTO Запросов к Gemini 3.5 Flash-Lite
-// ====================================================================
-
 @Serializable
 internal data class LiteWireRequest(
     @SerialName("systemInstruction") val systemInstruction: LiteSystemInstructionDto,
@@ -187,10 +179,6 @@ internal data class LiteUsageMetadataDto(
     val candidatesTokenCount: Int = 0
 )
 
-// ====================================================================
-// 3. Главный Диспетчер Роя: BuilderSwarmCoordinator
-// ====================================================================
-
 class BuilderSwarmCoordinator(
     private val context: Context,
     private val workspaceManager: LocalWorkspaceManager,
@@ -200,13 +188,14 @@ class BuilderSwarmCoordinator(
 ) : Closeable {
 
     companion object {
-        const val MAX_TOTAL_BUILDERS = 120 // Поддержка масштабных проектов до 100+ файлов
+        const val MAX_TOTAL_BUILDERS = 120
         const val MAX_PRIMARY_BUILDERS_A = 20
         const val MAX_CROSS_BUILDERS_B = 20
-        private const val CONCURRENCY_PERMITS = 20 // Высокопроизводительный пул сокетов
+        private const val CONCURRENCY_PERMITS = 20
 
         private const val LITE_MODEL_NAME = "gemini-3.5-flash-lite"
-        private const val API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+        // РАБОЧИЙ ЭНДПОИНТ CLIENTG:
+        private const val API_BASE_URL = "https://aiplatform.googleapis.com/v1/publishers/google/models"
         private const val WORKER_TIMEOUT_MS = 90_000L
 
         @OptIn(ExperimentalSerializationApi::class)
@@ -254,9 +243,6 @@ class BuilderSwarmCoordinator(
 
     private val swarmStartTime = System.currentTimeMillis()
 
-    /**
-     * Высокоскоростная регистрация независимого плоского воркера (1 воркер = 1 файл)
-     */
     suspend fun registerFlatBuilder(
         index: Int,
         targetFile: String,
@@ -285,7 +271,7 @@ class BuilderSwarmCoordinator(
         }
 
         check(currentState.registeredCount < MAX_TOTAL_BUILDERS) {
-            "Превышен абсолютный потолок роя ($MAX_TOTAL_BUILDERS воркеров)."
+            "Превышен потолок роя ($MAX_TOTAL_BUILDERS воркеров)."
         }
 
         val taskId = "flat_worker_${index.toString().padStart(2, '0')}_${UUID.randomUUID().toString().take(4)}"
@@ -457,7 +443,7 @@ class BuilderSwarmCoordinator(
 
     suspend fun sealBarrier(expectedCount: Int): Boolean = registrationMutex.withLock {
         check(expectedCount in 1..MAX_TOTAL_BUILDERS) {
-            "Недопустимое значение барьера: $expectedCount (Лимит 1..$MAX_TOTAL_BUILDERS)"
+            "Недопустимое значение барьера: $expectedCount"
         }
 
         val completedNow = collectedReports.size
@@ -665,7 +651,6 @@ class BuilderSwarmCoordinator(
                     )
                 )
             } else {
-                // Если воркер не вызвал инструмент, но у нас есть эталонный код — записываем его напрямую
                 if (touchedFiles.isEmpty() && !task.referenceCode.isNullOrBlank()) {
                     workspaceManager.writeFileAtomic(task.targetFile, task.referenceCode.toByteArray(Charsets.UTF_8))
                     touchedFiles.add(task.targetFile)
@@ -760,7 +745,8 @@ class BuilderSwarmCoordinator(
         history: List<LiteContentDto>
     ): LiteUnaryResponse = withContext(Dispatchers.IO) {
         val apiKey = apiKeyProvider().trim()
-        val url = "$API_BASE_URL/models/$LITE_MODEL_NAME:generateContent?key=$apiKey"
+        // РАБОЧИЙ ЭНДПОИНТ CLIENTG:
+        val url = "$API_BASE_URL/$LITE_MODEL_NAME:generateContent?key=$apiKey"
 
         val sandboxTools = listOf(
             GeminiToolDto(
