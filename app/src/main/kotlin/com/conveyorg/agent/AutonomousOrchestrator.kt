@@ -231,7 +231,6 @@ class AutonomousOrchestrator(
     private val loopMutex = Mutex()
 
     companion object {
-        // ЭТАЛОННЫЙ ЭНДПОИНТ ИЗ РАБОТАЮЩЕГО CLIENTG:
         private const val BASE_URL = "https://aiplatform.googleapis.com/v1/publishers/google/models"
         private const val ROOT_V1 = "https://aiplatform.googleapis.com/v1"
         private const val MODEL_NAME = "gemini-3.8-flash"
@@ -445,7 +444,7 @@ class AutonomousOrchestrator(
                 }
 
                 // ====================================================================
-                // РАЗВИЛКА: РЕЖИМ 1 (ГЕНЕРАТОР НА 266K + ЭТАП 8: СЕЛЕКЦИЯ И ПЛОСКИЙ РОЙ)
+                // РАЗВИЛКА: РЕЖИМ 1 (МОНОЛИТНЫЙ ПОТОКОВЫЙ ГЕНЕРАТОР НА 266K СИМВОЛОВ)
                 // ====================================================================
                 if (stage6Strategy.selectedMode == ConveyorExecutionMode.NEW_FILES_ONLY) {
                     val monolithResult = executeStage7MonolithicStreamGeneration(
@@ -1002,7 +1001,7 @@ class AutonomousOrchestrator(
                 _state.update {
                     it.copy(
                         phase = OrchestratorPhase.STREAM_GENERATION_STAGE7,
-                        statusMessage = "Этап 7: Генерация волны $waveIndex (планка 266k)... Собрано: $totalChars симв."
+                        statusMessage = "Этап 7 [HIGH]: Волна $waveIndex (планка 266k)... Собрано: $totalChars симв. (UFS 4.0)"
                     )
                 }
                 _events.emit(OrchestratorEvent.PhaseChanged(
@@ -1011,7 +1010,6 @@ class AutonomousOrchestrator(
                 ))
 
                 val apiKey = geminiApiKeyProvider().trim()
-                // РАБОЧИЙ ЭНДПОИНТ CLIENTG:
                 val endpoint = "$BASE_URL/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
 
                 val wireTools = listOf(GeminiToolDto(googleSearch = emptyMap()))
@@ -1093,6 +1091,11 @@ class AutonomousOrchestrator(
                                 }
                             }
                             outputStream.flush()
+
+                            // Живая телеметрия в UI по мере стриминга на диск
+                            _state.update {
+                                it.copy(statusMessage = "Стриминг волны $waveIndex: $currentWaveChars / 266 000 симв. (Всего: $totalChars)")
+                            }
 
                             if (currentWaveChars >= CONVEYOR_STREAM_CHAR_LIMIT || isCompleted) {
                                 break
@@ -1176,6 +1179,9 @@ class AutonomousOrchestrator(
             if (path.isNotBlank() && code.isNotBlank()) {
                 extractedFilesCount++
                 val fileNum = extractedFilesCount
+                _state.update {
+                    it.copy(statusMessage = "Селекция: запуск воркера #$fileNum -> ${path.substringAfterLast('/')}")
+                }
                 coordinatorScopeLaunch {
                     swarmCoordinator.registerFlatBuilder(
                         index = fileNum,
@@ -1214,9 +1220,11 @@ class AutonomousOrchestrator(
             throw IllegalStateException("В монолите не обнаружено ни одного размеченного файла (>>> FILE: ...).")
         }
 
+        _state.update { it.copy(statusMessage = "Запечатывание барьера на $extractedFilesCount файлов. Ожидание записи на UFS 4.0...") }
         swarmCoordinator.sealBarrier(extractedFilesCount)
         val manifest = swarmCoordinator.awaitGreenLight(300_000L)
 
+        _state.update { it.copy(statusMessage = "Зелёная лампочка получена! Подсчёт дельты UFS 4.0...") }
         val delta = workspaceManager.computeChangedFiles()
         if (delta.modifiedFiles.isEmpty()) {
             throw IllegalStateException("Файлы не зафиксированы на диске UFS 4.0 после отчётов роя.")
@@ -1342,7 +1350,6 @@ class AutonomousOrchestrator(
         cachedContentId: String? = null
     ): AgentContentDto = withContext(Dispatchers.IO) {
         val apiKey = geminiApiKeyProvider().trim()
-        // РАБОЧИЙ ЭНДПОИНТ CLIENTG:
         val endpoint = "$BASE_URL/$MODEL_NAME:streamGenerateContent?key=$apiKey&alt=sse"
 
         val sanitizedHistory = sanitizeHistoryForWire(history)
